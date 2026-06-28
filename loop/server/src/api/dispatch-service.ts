@@ -189,19 +189,62 @@ export function requeueStaleClaimed(db: Db, ttlMs: number = claimTtlMs()): numbe
   return r.changes
 }
 
-// Pending dispatches for agents this machine can run (online instance present).
-export function pollDispatches(db: Db, machineId: string, limit = 16): DispatchView[] {
-  requeueStaleClaimed(db)
-  const rows = db.all<RawDispatch>(
-    `SELECT ${DISPATCH_COLS} FROM dispatch
-     WHERE state = 'pending'
-       AND EXISTS (SELECT 1 FROM instance i WHERE i.agent_id = dispatch.agent_id AND i.machine_id = ? AND i.online = 1)
-     ORDER BY created_at
-     LIMIT ?`,
-    machineId,
-    limit,
+// Instance liveness TTL — how long an instance stays "online" after its host's last
+// heartbeat/poll. MUST be greater than LOOP_CLAIM_TTL_MS (and greater than a single
+// real-runtime exec): the reference machine client polls but does not POST /heartbeat,
+// so a poll refreshes last_seen_at (see pollDispatches) and only a truly-silent host
+// (crash / network loss) lets its instances cross this threshold. R-008 eventual-consistency
+// closure: a reaped-offline instance's pending dispatches are no longer eligible for that
+// machine (the EXISTS online=1 filter) and wait for another machine hosting the agent.
+function instanceTtlMs(): number {
+  const claim = claimTtlMs()
+  const raw = Number(process.env.LOOP_INSTANCE_TTL_MS)
+  if (Number.isFinite(raw) && raw > 0) {
+    if (raw < claim) {
+      console.warn(
+        `[loop] LOOP_INSTANCE_TTL_MS=${raw}ms < LOOP_CLAIM_TTL_MS=${claim}ms; clamping to claim+60s to avoid reaping instances mid-exec.`,
+      )
+      return claim + 60_000
+    }
+    return raw
+  }
+  return Math.max(claim * 2, 600_000)
+}
+
+// Mark instances whose host has gone silent offline. Pure structured fact
+// (`online = 1 AND last_seen_at < cutoff`) — no string/keyword routing (hard-ban honored).
+export function reapStaleInstances(db: Db, ttlMs: number = instanceTtlMs()): number {
+  const cutoff = now() - ttlMs
+  const r = db.run(
+    'UPDATE instance SET online = 0 WHERE online = 1 AND last_seen_at IS NOT NULL AND last_seen_at < ?',
+    cutoff,
   )
-  return rows.map((r) => dispatchToView(db, r))
+  return r.changes
+}
+
+// Pending dispatches for agents this machine can run (online instance present). A poll is
+// also a liveness signal: we refresh THIS machine's online instances' last_seen_at first
+// (reusing heartbeat), so an actively-polling host is never reaped; then reap silent hosts'
+// instances and requeue expired leases, then read. All under one transaction — node:sqlite
+// is synchronous so each statement's effect is visible to the next; the tx keeps reap/requeue
+// atomic vs a concurrent cross-process claim if this ever swaps to an async driver (client.ts
+// notes Postgres as the swap point).
+export function pollDispatches(db: Db, machineId: string, limit = 16): DispatchView[] {
+  return db.transaction(() => {
+    heartbeat(db, machineId)
+    reapStaleInstances(db)
+    requeueStaleClaimed(db)
+    const rows = db.all<RawDispatch>(
+      `SELECT ${DISPATCH_COLS} FROM dispatch
+       WHERE state = 'pending'
+         AND EXISTS (SELECT 1 FROM instance i WHERE i.agent_id = dispatch.agent_id AND i.machine_id = ? AND i.online = 1)
+       ORDER BY created_at
+       LIMIT ?`,
+      machineId,
+      limit,
+    )
+    return rows.map((r) => dispatchToView(db, r))
+  })
 }
 
 type RawDispatchScoped = RawDispatch & { workspace_id: string }
@@ -302,6 +345,32 @@ export function abandonDispatch(db: Db, dispatchId: string, machine: AuthedMachi
       "UPDATE dispatch SET state = 'pending', claimed_by_machine = NULL, claimed_at = NULL WHERE id = ?",
       dispatchId,
     )
+    return dispatchToView(db, db.get<RawDispatch>(`SELECT ${DISPATCH_COLS} FROM dispatch WHERE id = ?`, dispatchId)!)
+  })
+}
+
+// Claimed lease renewal (M3, D-024 Directive). A machine executing a long runtime
+// (claude -p etc., potentially minutes) renews the lease periodically so that
+// requeueStaleClaimed does not reset its claim mid-exec — which would let another
+// machine re-claim the same dispatch and produce a DUPLICATE agent reply. CAS mirrors
+// abandon/complete: only the current claimer, only while still claimed. If the lease was
+// already lost (requeued / re-claimed by another machine) the CAS matches zero rows and
+// the caller treats the 409 as "gracefully abandon exec" — no duplicate reply, no moat break.
+export function renewClaim(db: Db, dispatchId: string, machine: AuthedMachine): DispatchView {
+  return db.transaction(() => {
+    const d = loadScoped(db, dispatchId)
+    if (d.workspace_id !== machine.workspaceId) throw new HttpError(404, 'dispatch not found')
+    if (d.state !== 'claimed') throw new HttpError(409, `dispatch not claimed (state=${d.state})`)
+    if (d.claimed_by_machine !== machine.id) {
+      throw new HttpError(403, 'dispatch claimed by another machine')
+    }
+    const r = db.run(
+      "UPDATE dispatch SET claimed_at = ? WHERE id = ? AND state = 'claimed' AND claimed_by_machine = ?",
+      now(),
+      dispatchId,
+      machine.id,
+    )
+    if (r.changes !== 1) throw new HttpError(409, 'dispatch lease lost')
     return dispatchToView(db, db.get<RawDispatch>(`SELECT ${DISPATCH_COLS} FROM dispatch WHERE id = ?`, dispatchId)!)
   })
 }

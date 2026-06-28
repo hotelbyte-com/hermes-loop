@@ -67,6 +67,28 @@ export const zCompleteDispatch = z.object({
   error: z.string().max(2000).optional(),
 })
 
+// ---------- tasks (parent/child work items, D-015 / roadmap M3 §D.2.3 W7) ----------
+
+export const taskStatus = z.enum(['open', 'in_progress', 'done', 'cancelled'])
+export type TaskStatus = z.infer<typeof taskStatus>
+
+// assigneeId and assigneeKind are coupled: either both present or both absent.
+export const zCreateTask = z
+  .object({
+    title: z.string().min(1).max(400),
+    parentTaskId: z.string().min(1).nullish(),
+    threadId: z.string().min(1).nullish(),
+    assigneeId: z.string().min(1).nullish(),
+    assigneeKind: memberKind.nullish(),
+  })
+  .refine((d) => (d.assigneeId ? !!d.assigneeKind : !d.assigneeKind), {
+    message: 'assigneeId requires assigneeKind',
+  })
+
+export const zUpdateTaskStatus = z.object({
+  status: taskStatus,
+})
+
 export type PostMessageInput = z.infer<typeof zPostMessage>
 
 // ---------- output views ----------
@@ -178,5 +200,18 @@ export type WorkspaceView = {
   id: string
   slug: string
   name: string
+  createdAt: number
+}
+
+export type TaskView = {
+  id: string
+  workspaceId: string
+  parentTaskId: string | null
+  threadId: string | null
+  assigneeId: string | null
+  assigneeKind: MemberKind | null
+  assigneeHandle: string | null
+  title: string
+  status: TaskStatus
   createdAt: number
 }

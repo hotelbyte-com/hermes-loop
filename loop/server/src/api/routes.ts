@@ -4,6 +4,7 @@
 // api/delivery-service.ts -> delivery/decider.ts (the moat). This file is HTTP only.
 
 import { Hono, type Context } from 'hono'
+import { timingSafeEqual } from 'node:crypto'
 
 import type { Db } from '../db/client.ts'
 import { newId, now } from '../db/id.ts'
@@ -18,23 +19,33 @@ import {
   HttpError,
   pollDispatches,
   registerMachine,
+  renewClaim,
   upsertInstance,
 } from './dispatch-service.ts'
+import {
+  createTask,
+  getTask,
+  listTasks,
+  updateTaskStatus,
+} from './task-service.ts'
 import {
   broadcastPolicySchema,
   type AgentView,
   type ChannelView,
   type HumanView,
   type MachineView,
+  type TaskView,
   type WorkspaceView,
   zAddMember,
   zCreateChannel,
+  zCreateTask,
   zCreateThread,
   zCreateWorkspace,
   zPostMessage,
   zRegisterMachine,
   zUpsertInstance,
   zCompleteDispatch,
+  zUpdateTaskStatus,
 } from './contract.ts'
 import {
   channelView,
@@ -75,6 +86,34 @@ function bearerOf(c: Context): string | undefined {
   if (!h) return undefined
   const m = /^Bearer\s+(.+)$/i.exec(h)
   return m ? m[1].trim() : undefined
+}
+
+// ---------- seed endpoint gate (demo-only, D-024 Not-tested / D-025) ----------
+//
+// seedPmScenario mutates the store (and writes .data/machine.json), so the HTTP endpoint
+// must not be reachable by arbitrary clients. The gate is anchored on the SERVER-side
+// configured bind host (LOOP_BIND_HOST, default 127.0.0.1) — NEVER the client Host header,
+// which is forgeable and would let a remote attacker bypass loopback. When an operator
+// exposes the server to the network (LOOP_BIND_HOST != loopback) they MUST arm LOOP_SEED_TOKEN.
+// `pnpm seed` (cli/seed.ts) calls seedPmScenario directly, bypassing HTTP, so local dev is
+// unaffected; the web first-screen auto-seed works because it hits the loopback-bound dev
+// server. A denied request returns 404 to hide the endpoint's existence (no token-probe leak).
+const LOOPBACK_BIND_HOSTS = new Set(['127.0.0.1', '::1', 'localhost', '', '0:0:0:0:0:0:0:1'])
+
+function seedBindIsLoopback(): boolean {
+  const bind = (process.env.LOOP_BIND_HOST ?? '127.0.0.1').toLowerCase()
+  return LOOPBACK_BIND_HOSTS.has(bind)
+}
+
+function seedAuthorized(c: Context): boolean {
+  const expected = process.env.LOOP_SEED_TOKEN
+  if (!expected) return seedBindIsLoopback() // no token armed → loopback-only
+  const got = bearerOf(c)
+  if (!got) return false
+  // Constant-time compare; guard length first to avoid timingSafeEqual throwing on mismatch.
+  const a = Buffer.from(got)
+  const b = Buffer.from(expected)
+  return a.length === b.length && timingSafeEqual(a, b)
 }
 
 export function buildApp(db: Db): Hono {
@@ -422,9 +461,75 @@ export function buildApp(db: Db): Hono {
     }
   })
 
+  // Renew a claimed lease mid-exec (M3, D-024 Directive): lets a long runtime keep its
+  // claim past LOOP_CLAIM_TTL_MS so requeueStaleClaimed does not hand the dispatch to a
+  // second machine (duplicate agent reply). CAS — only the current claimer, while claimed.
+  app.post('/api/dispatches/:id/renew', (c) => {
+    try {
+      const auth = authMachineByToken(db, bearerOf(c))
+      return c.json(renewClaim(db, c.req.param('id'), auth), 200)
+    } catch (e) {
+      return errResponse(c, e)
+    }
+  })
+
+  // ---------- tasks (parent/child work items, M3 §D.2.3 W7) ----------
+
+  app.get('/api/workspaces/:wid/tasks', (c) => {
+    const threadId = c.req.query('threadId')
+    const parentTaskIdRaw = c.req.query('parentId')
+    const parentTaskId =
+      parentTaskIdRaw === undefined ? undefined : parentTaskIdRaw === '' ? null : parentTaskIdRaw
+    return c.json(listTasks(db, c.req.param('wid'), { threadId, parentTaskId }))
+  })
+
+  app.post('/api/workspaces/:wid/tasks', async (c) => {
+    const wid = c.req.param('wid')
+    const ws = db.get<{ id: string }>('SELECT id FROM workspace WHERE id = ?', wid)
+    if (!ws) return notFound(c, 'workspace not found')
+    const parsed = zCreateTask.safeParse(await c.req.json().catch(() => null))
+    if (!parsed.success) return bad(c, parsed.error.message)
+    try {
+      return c.json(createTask(db, wid, parsed.data), 201)
+    } catch (e) {
+      return errResponse(c, e)
+    }
+  })
+
+  app.get('/api/workspaces/:wid/tasks/:tid', (c) => {
+    try {
+      return c.json(getTask(db, c.req.param('wid'), c.req.param('tid')))
+    } catch (e) {
+      return errResponse(c, e)
+    }
+  })
+
+  app.get('/api/workspaces/:wid/tasks/:tid/children', (c) => {
+    try {
+      // Verifies the parent exists + is in workspace (404 otherwise), then lists direct children.
+      getTask(db, c.req.param('wid'), c.req.param('tid'))
+      return c.json(listTasks(db, c.req.param('wid'), { parentTaskId: c.req.param('tid') }))
+    } catch (e) {
+      return errResponse(c, e)
+    }
+  })
+
+  app.patch('/api/workspaces/:wid/tasks/:tid/status', async (c) => {
+    const parsed = zUpdateTaskStatus.safeParse(await c.req.json().catch(() => null))
+    if (!parsed.success) return bad(c, parsed.error.message)
+    try {
+      return c.json(updateTaskStatus(db, c.req.param('wid'), c.req.param('tid'), parsed.data.status))
+    } catch (e) {
+      return errResponse(c, e)
+    }
+  })
+
   // ---------- seed ----------
 
-  app.post('/api/seed/pm-scenario', (c) => c.json(seedPmScenario(db), 201))
+  app.post('/api/seed/pm-scenario', (c) => {
+    if (!seedAuthorized(c)) return notFound(c, 'not found')
+    return c.json(seedPmScenario(db), 201)
+  })
 
   return app
 }

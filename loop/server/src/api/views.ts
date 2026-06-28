@@ -12,6 +12,8 @@ import type {
   MachineView,
   MessageView,
   NoticeView,
+  TaskStatus,
+  TaskView,
   WorkspaceView,
 } from './contract.ts'
 
@@ -260,4 +262,33 @@ export function countMembers(db: Db, channelId: string): number {
     channelId,
   )
   return r?.n ?? 0
+}
+
+export type RawTask = {
+  id: string
+  workspace_id: string
+  parent_task_id: string | null
+  thread_id: string | null
+  assignee_id: string | null
+  assignee_kind: string | null
+  title: string
+  status: string
+  created_at: number
+}
+
+export function taskView(db: Db, r: RawTask): TaskView {
+  const assigneeKind = r.assignee_kind as MemberKind | null
+  return {
+    id: r.id,
+    workspaceId: r.workspace_id,
+    parentTaskId: r.parent_task_id,
+    threadId: r.thread_id,
+    assigneeId: r.assignee_id,
+    assigneeKind,
+    assigneeHandle:
+      r.assignee_id && assigneeKind ? handleOf(db, r.assignee_id, assigneeKind) : null,
+    title: r.title,
+    status: r.status as TaskStatus,
+    createdAt: r.created_at,
+  }
 }
