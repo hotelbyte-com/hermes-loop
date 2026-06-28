@@ -8,7 +8,7 @@
     "start": "node src/index.ts",
     "seed": "node src/cli/seed.ts",
     "machine": "node src/cli/machine.ts",
-    "test": "node --test src/test/dispatch.test.ts",
+    "test": "node --test src/test/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

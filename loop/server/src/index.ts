@@ -16,6 +16,11 @@ import { createStore } from './store.ts'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const port = Number(process.env.PORT ?? 8188)
+// Bind loopback by default. The control plane is meant to sit behind a reverse proxy on
+// the same host (or run locally); exposing it directly to the network is opt-in via
+// LOOP_BIND_HOST. This is also the trust anchor for the demo-only /api/seed gate
+// (routes.ts): "loopback" is a real network fact here, not a forgeable Host header.
+const hostname = process.env.LOOP_BIND_HOST ?? '127.0.0.1'
 const db = createStore()
 
 const root = new Hono()
@@ -36,6 +41,6 @@ if (existsSync(indexHtmlPath)) {
   console.log('[loop] no built web bundle found — run `pnpm dev:web` (or `pnpm build:web`) for the UI')
 }
 
-serve({ fetch: root.fetch, port }, (info) => {
-  console.log(`[loop] control plane on http://127.0.0.1:${info.port}`)
+serve({ fetch: root.fetch, hostname, port }, (info) => {
+  console.log(`[loop] control plane on http://${info.address ?? hostname}:${info.port}`)
 })

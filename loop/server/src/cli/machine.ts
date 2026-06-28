@@ -50,6 +50,15 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms))
 }
 
+// Lease renewal interval: comfortably under half the server's LOOP_CLAIM_TTL_MS so a
+// long-running runtime keeps its claim and is not requeued onto another machine
+// (which would duplicate the agent reply). Defaults to 60s when TTL is the 5min default.
+function renewIntervalMs(): number {
+  const ttl = Number(process.env.LOOP_CLAIM_TTL_MS)
+  const t = Number.isFinite(ttl) && ttl > 0 ? ttl : 300_000
+  return Math.min(Math.floor(t / 2), 60_000)
+}
+
 async function execute(d: DispatchView, exec: string[] | null): Promise<RuntimeResult> {
   const input: RuntimeInput = {
     dispatchId: d.id,
@@ -114,7 +123,37 @@ async function handleOne(
     `[loop-machine] claimed ${d.id} → ${claimed.agentHandle} (${claimed.payload.reasonCode})`,
   )
 
-  const result = await execute(claimed, exec)
+  // Renew the lease WHILE the runtime executes (M3, D-024 Directive). Without this, a
+  // runtime exceeding LOOP_CLAIM_TTL_MS gets its dispatch requeued by the server, another
+  // machine re-claims and re-runs it → a DUPLICATE agent reply. If the server reports the
+  // lease lost (non-2xx: it was requeued/re-claimed), stop renewing and let the runtime
+  // finish naturally — its `complete` will then 409 and be discarded below. We do NOT kill
+  // the spawned child (no handle to it here): the moat is preserved (no duplicate reply),
+  // only the orphaned runtime's work is wasted. A transient network error keeps retrying.
+  const renewMs = renewIntervalMs()
+  let leaseLost = false
+  const renewTimer = setInterval(async () => {
+    try {
+      const r = await fetch(`${base}/api/dispatches/${d.id}/renew`, { method: 'POST', headers })
+      if (!r.ok) {
+        leaseLost = true
+        clearInterval(renewTimer)
+        console.warn(
+          `[loop-machine] lease lost on ${d.id} (renew ${r.status}); result will be discarded`,
+        )
+      }
+    } catch (e) {
+      console.warn(`[loop-machine] renew ${d.id} failed (will retry): ${String(e)}`)
+    }
+  }, renewMs)
+
+  let result: RuntimeResult
+  try {
+    result = await execute(claimed, exec)
+  } finally {
+    clearInterval(renewTimer)
+  }
+
   const complete = await fetch(`${base}/api/dispatches/${d.id}/complete`, {
     method: 'POST',
     headers,
@@ -125,6 +164,8 @@ async function handleOne(
     console.log(
       `[loop-machine] completed ${d.id} ok=${result.ok} reply=${body.reply ? body.reply.id : '—'}`,
     )
+  } else if (leaseLost) {
+    console.warn(`[loop-machine] complete ${d.id} discarded (lease had been lost): ${complete.status}`)
   } else {
     console.error(`[loop-machine] complete failed: ${complete.status} ${await complete.text()}`)
   }
