@@ -1,0 +1,17 @@
+{
+  "name": "loop",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Loop — open-source controllable-delivery collaboration (Soul/Agent/Instance + delivery diagnostics). Central control plane for loop.hotelbyte.com.",
+  "type": "module",
+  "scripts": {
+    "dev:server": "pnpm --filter ./server dev",
+    "dev:web": "pnpm --filter ./web dev",
+    "build:web": "pnpm --filter ./web build",
+    "typecheck": "pnpm -r typecheck",
+    "seed": "pnpm --filter ./server seed"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild"]
+  }
+}
