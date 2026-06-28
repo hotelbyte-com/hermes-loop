@@ -18,8 +18,10 @@ import { postMessage } from '../api/delivery-service.ts'
 import {
   authMachineByToken,
   claimDispatch,
+  claimTtlMs,
   completeDispatch,
   HttpError,
+  instanceTtlMs,
   pollDispatches,
   reapStaleInstances,
   registerMachine,
@@ -303,4 +305,137 @@ test('a reaped machine\'s pending dispatch is claimable by another live machine 
   assert.equal(claimed.state, 'claimed')
   assert.equal(claimed.claimedByMachine, m2.machine.id)
   f.db.close()
+})
+
+// ---------- D-027/D-028 (V2.3): lease CAS hardening + federation liveness contract ----------
+//
+// These lock the subtle distributed-correctness invariants formalized in D-027/D-028.
+// The CAS predicates added to complete/abandon are defense-in-depth for the planned Postgres
+// swap; under node:sqlite DatabaseSync (single sync writer) the read-checks already reject,
+// so these tests assert the OBSERVABLE invariant (duplicate-reply = 0) rather than the
+// unreachable-under-sync CAS 0-row branch. The real Postgres-Read-Committed TOCTOU remains a
+// recorded residual risk to re-verify on the actual async driver (D-027 Not-tested).
+
+test('D-027/D-028: duplicate-reply = 0 across lease-loss/takeover (the moat surface)', () => {
+  const f = fixture()
+  // A second machine hosting the SAME agent online — eligible to take over the dispatch.
+  const m2 = registerMachine(f.db, f.wid, 'mac2', null)
+  upsertInstance(f.db, f.wid, f.a1, { machineId: m2.machine.id, runtime: 'claude-code', online: true })
+  const auth2 = authMachineByToken(f.db, m2.token)
+
+  post(f, '@SpecBot go')
+  const dsp = pollDispatches(f.db, f.machineId).find((d) => d.agentHandle === 'SpecBot')!
+  claimDispatch(f.db, dsp.id, f.auth) // mac1 holds the lease
+
+  // Case 1: lease goes stale, mac2 RE-CLAIMS (still-claimed by mac2) → mac1's late complete is 403.
+  f.db.run('UPDATE dispatch SET claimed_at = ? WHERE id = ?', now() - 301_000, dsp.id)
+  requeueStaleClaimed(f.db, 300_000) // resets mac1's stale claim → pending
+  claimDispatch(f.db, dsp.id, auth2) // mac2 takes over (state=claimed, claimed_by_machine=mac2)
+  assert.throws(
+    () => completeDispatch(f.db, dsp.id, f.auth, { ok: true, replyBody: 'DUP from mac1 (case1)' }),
+    (e) => e instanceof HttpError && e.status === 403,
+    'late complete while another machine holds the claim → 403',
+  )
+  // mac2 completes legitimately → exactly one agent reply lands.
+  completeDispatch(f.db, dsp.id, auth2, { ok: true, replyBody: 'from mac2' })
+  assert.equal(
+    f.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM message WHERE channel_id = ? AND author_kind = 'agent'", f.cid)!.n,
+    1,
+    'one agent reply so far',
+  )
+
+  // Case 2: a fresh dispatch — mac1 claims, lease requeued back to PENDING (not re-claimed)
+  //         → mac1's late complete is 409 (state≠claimed), no second reply.
+  post(f, '@SpecBot second')
+  const dsp2 = pollDispatches(f.db, f.machineId).find((d) => d.agentHandle === 'SpecBot' && d.id !== dsp.id)!
+  claimDispatch(f.db, dsp2.id, f.auth)
+  f.db.run('UPDATE dispatch SET claimed_at = ? WHERE id = ?', now() - 301_000, dsp2.id)
+  requeueStaleClaimed(f.db, 300_000) // → pending
+  assert.equal(
+    f.db.get<{ state: string }>('SELECT state FROM dispatch WHERE id = ?', dsp2.id)!.state,
+    'pending',
+  )
+  assert.throws(
+    () => completeDispatch(f.db, dsp2.id, f.auth, { ok: true, replyBody: 'DUP from mac1 (case2)' }),
+    (e) => e instanceof HttpError && e.status === 409,
+    'late complete on a requeued (pending) dispatch → 409',
+  )
+
+  // Net: two wakes, both late-completes rejected → still exactly ONE agent reply. Moat holds.
+  assert.equal(
+    f.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM message WHERE channel_id = ? AND author_kind = 'agent'", f.cid)!.n,
+    1,
+    'no duplicate agent reply — controllable delivery holds across takeover',
+  )
+  f.db.close()
+})
+
+test('D-028: reaper is global — machine B\'s poll reaps silent machine A\'s instance', () => {
+  const f = fixture()
+  const m2 = registerMachine(f.db, f.wid, 'mac2', null)
+  upsertInstance(f.db, f.wid, f.a2, { machineId: m2.machine.id, runtime: 'claude-code', online: true })
+
+  // machine A (mac1) goes silent — backdate its instance far past any TTL.
+  f.db.run('UPDATE instance SET last_seen_at = ? WHERE machine_id = ?', now() - 10_000_000, f.machineId)
+  assert.equal(
+    f.db.get<{ online: number }>('SELECT online FROM instance WHERE machine_id = ? AND agent_id = ?', f.machineId, f.a1)!.online,
+    1,
+  )
+  // machine B polls — pollDispatches runs reapStaleInstances GLOBALLY (not scoped to the caller),
+  // so A's silent instance is reaped even though B issued the poll.
+  pollDispatches(f.db, m2.machine.id)
+  assert.equal(
+    f.db.get<{ online: number }>('SELECT online FROM instance WHERE machine_id = ? AND agent_id = ?', f.machineId, f.a1)!.online,
+    0,
+    "B's poll reaped A's silent instance — the reaper is not isolated per machine",
+  )
+  f.db.close()
+})
+
+test('D-028: two machines claiming the same pending dispatch resolve to one winner (federation CAS)', () => {
+  const f = fixture()
+  const m2 = registerMachine(f.db, f.wid, 'mac2', null)
+  upsertInstance(f.db, f.wid, f.a1, { machineId: m2.machine.id, runtime: 'claude-code', online: true })
+  const auth2 = authMachineByToken(f.db, m2.token)
+
+  post(f, '@SpecBot go')
+  const dsp = pollDispatches(f.db, f.machineId).find((d) => d.agentHandle === 'SpecBot')!
+  // mac1 wins the pending→claimed CAS.
+  const claimed = claimDispatch(f.db, dsp.id, f.auth)
+  assert.equal(claimed.state, 'claimed')
+  assert.equal(claimed.claimedByMachine, f.machineId)
+  // mac2 is rejected — the WHERE state='pending' CAS yielded zero rows. No double-claim.
+  assert.throws(
+    () => claimDispatch(f.db, dsp.id, auth2),
+    (e) => e instanceof HttpError && e.status === 409,
+  )
+  f.db.close()
+})
+
+test('D-027: TTL invariants — instanceTtlMs > claimTtlMs across default / override / clamp', () => {
+  const prevC = process.env.LOOP_CLAIM_TTL_MS
+  const prevI = process.env.LOOP_INSTANCE_TTL_MS
+  const cases: Array<{ name: string; claim?: string; inst?: string }> = [
+    { name: 'defaults' },
+    { name: 'claim override 120s', claim: '120000' },
+    { name: 'instance override 20min', inst: '1200000' },
+    { name: 'instance < claim triggers clamp', claim: '300000', inst: '60000' },
+  ]
+  try {
+    for (const c of cases) {
+      setEnv('LOOP_CLAIM_TTL_MS', prevC)
+      setEnv('LOOP_INSTANCE_TTL_MS', prevI)
+      if (c.claim !== undefined) process.env.LOOP_CLAIM_TTL_MS = c.claim
+      if (c.inst !== undefined) process.env.LOOP_INSTANCE_TTL_MS = c.inst
+      const claim = claimTtlMs()
+      const inst = instanceTtlMs()
+      assert.ok(inst > claim, `${c.name}: instanceTtl(${inst}) must be > claimTtl(${claim})`)
+      if (c.name.startsWith('instance < claim')) {
+        assert.equal(inst, claim + 60_000, 'clamp path must return claim+60s')
+      }
+    }
+  } finally {
+    setEnv('LOOP_CLAIM_TTL_MS', prevC)
+    setEnv('LOOP_INSTANCE_TTL_MS', prevI)
+  }
 })
