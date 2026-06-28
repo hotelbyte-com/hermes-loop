@@ -175,7 +175,7 @@ function machineEligible(db: Db, machineId: string, agentId: string): boolean {
 // take minutes; tune via LOOP_CLAIM_TTL_MS. A proper lease-renewal (heartbeat-during-exec)
 // is deferred to M3 — until then, a runtime exceeding the TTL will have its dispatch
 // requeued (review finding: avoid duplicate replies by keeping the TTL above runtime latency).
-function claimTtlMs(): number {
+export function claimTtlMs(): number {
   const env = Number(process.env.LOOP_CLAIM_TTL_MS)
   return Number.isFinite(env) && env > 0 ? env : 300_000
 }
@@ -196,7 +196,7 @@ export function requeueStaleClaimed(db: Db, ttlMs: number = claimTtlMs()): numbe
 // (crash / network loss) lets its instances cross this threshold. R-008 eventual-consistency
 // closure: a reaped-offline instance's pending dispatches are no longer eligible for that
 // machine (the EXISTS online=1 filter) and wait for another machine hosting the agent.
-function instanceTtlMs(): number {
+export function instanceTtlMs(): number {
   const claim = claimTtlMs()
   const raw = Number(process.env.LOOP_INSTANCE_TTL_MS)
   if (Number.isFinite(raw) && raw > 0) {
@@ -229,6 +229,14 @@ export function reapStaleInstances(db: Db, ttlMs: number = instanceTtlMs()): num
 // is synchronous so each statement's effect is visible to the next; the tx keeps reap/requeue
 // atomic vs a concurrent cross-process claim if this ever swaps to an async driver (client.ts
 // notes Postgres as the swap point).
+//
+// D-028 contract (federation liveness/reaper/takeover, closes R-008): the
+// refresh→reap→requeue→read ordering above is the invariant set — (a) poll=liveness
+// (self-reap unreachable because refresh precedes reap in one tx), (b) instanceTtl≥claimTtl,
+// (c) takeover = stale-claim reset + pending→claimed CAS (requeue is pure claim-TTL,
+// decoupled from instance reap). The atomicity is a property of node:sqlite DatabaseSync's
+// single sync writer, NOT a SQL isolation level — any async driver / connection-pool /
+// Postgres swap MUST re-establish no-interleaving (SELECT FOR UPDATE / advisory lock) first.
 export function pollDispatches(db: Db, machineId: string, limit = 16): DispatchView[] {
   return db.transaction(() => {
     heartbeat(db, machineId)
@@ -302,13 +310,23 @@ export function completeDispatch(
       ...(input.replyBody ? { replyBody: input.replyBody } : {}),
       ...(input.error ? { error: input.error } : {}),
     }
-    db.run(
-      "UPDATE dispatch SET state = ?, result = ?, completed_at = ? WHERE id = ?",
+    // D-027: CAS-predicated UPDATE (defense-in-depth for the planned Postgres swap).
+    // The read-checks above throw precise 403/409 diagnostics; this WHERE clause +
+    // changes===1 assertion close the read-after-write TOCTOU window that opens under an
+    // async driver / Postgres Read Committed, where two machines' complete transactions
+    // could interleave between the read and an unconditional UPDATE — both would hit, and
+    // postMessage below would run twice → a real duplicate agent reply (the only true
+    // duplicate-reply surface). Under node:sqlite DatabaseSync (single sync writer) this
+    // UPDATE never 0-rows when the read-checks passed; the assertion is belt-and-braces.
+    const upd = db.run(
+      "UPDATE dispatch SET state = ?, result = ?, completed_at = ? WHERE id = ? AND state = 'claimed' AND claimed_by_machine = ?",
       input.ok ? 'done' : 'failed',
       JSON.stringify(result),
       now(),
       dispatchId,
+      machine.id,
     )
+    if (upd.changes !== 1) throw new HttpError(409, 'dispatch lease lost (concurrent complete)')
 
     let reply: MessageView | null = null
     if (input.ok && input.replyBody && input.replyBody.trim()) {
@@ -341,10 +359,14 @@ export function abandonDispatch(db: Db, dispatchId: string, machine: AuthedMachi
     if (d.claimed_by_machine !== machine.id) {
       throw new HttpError(403, 'dispatch claimed by another machine')
     }
-    db.run(
-      "UPDATE dispatch SET state = 'pending', claimed_by_machine = NULL, claimed_at = NULL WHERE id = ?",
+    // D-027: CAS-predicated UPDATE mirroring renewClaim/completeDispatch — closes the
+    // read-after-write TOCTOU window under an async driver / Postgres swap (see completeDispatch).
+    const upd = db.run(
+      "UPDATE dispatch SET state = 'pending', claimed_by_machine = NULL, claimed_at = NULL WHERE id = ? AND state = 'claimed' AND claimed_by_machine = ?",
       dispatchId,
+      machine.id,
     )
+    if (upd.changes !== 1) throw new HttpError(409, 'dispatch lease lost (concurrent abandon)')
     return dispatchToView(db, db.get<RawDispatch>(`SELECT ${DISPATCH_COLS} FROM dispatch WHERE id = ?`, dispatchId)!)
   })
 }
