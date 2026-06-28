@@ -17,7 +17,12 @@
 
 import type { Mention, MemberKind } from './types.ts'
 
-const MENTION_RE = /@([^\s@,;:!>()\[\]{}"']+)/gu
+// Handle charset = Unicode letters / digits / underscore / dash. Defining it POSITIVELY
+// (rather than "anything that isn't an ASCII delimiter") means ANY punctuation — including
+// CJK/fullwidth punctuation like 。，（）、！？ — terminates the handle. This matters for a
+// Chinese product: `给@SpecBot。`, `（@Alice）`, `@调研机器人，出个方案` all tokenize correctly.
+// `\p{L}` covers Latin + CJK ideographs, so CJK display names are first-class handles.
+const MENTION_RE = /@([\p{L}\p{N}_-]+)/gu
 
 export type HandleResolver = (
   handle: string,

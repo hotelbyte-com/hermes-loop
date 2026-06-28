@@ -149,3 +149,38 @@ CREATE INDEX IF NOT EXISTS idx_message_channel ON message(channel_id);
 CREATE INDEX IF NOT EXISTS idx_message_thread ON message(thread_id);
 CREATE INDEX IF NOT EXISTS idx_member_channel ON channel_member(channel_id);
 CREATE INDEX IF NOT EXISTS idx_instance_agent ON instance(agent_id);
+
+-- Dispatch: the runtime execution bridge (D-024). When a message delivery WAKES an
+-- agent (verdict.wake && recipientKind='agent' && state='delivered'), the control
+-- plane records a dispatch targeting that agent. A Machine hosting an ONLINE instance
+-- of the agent may poll/claim/complete it. The server NEVER executes a runtime (D-021):
+-- it only schedules delivery + records the dispatch lifecycle. On `complete` with a
+-- replyBody, the runtime's output is posted back as an agent-authored message (via the
+-- same postMessage critical path), re-entering the decider — so delivery diagnostics
+-- compose across the human -> agent -> reply chain, all auditable.
+--
+-- A dispatch targets an AGENT, not a specific machine: any machine with an online
+-- instance of that agent is eligible. Pending dispatches for an offline agent simply
+-- wait (queued) until an instance comes online — direct @mention of an offline agent
+-- is delivered+queued, not dropped.
+CREATE TABLE IF NOT EXISTS dispatch (
+  id TEXT PRIMARY KEY,
+  message_id TEXT NOT NULL REFERENCES message(id) ON DELETE CASCADE,
+  delivery_id TEXT NOT NULL REFERENCES message_delivery(id) ON DELETE CASCADE,
+  workspace_id TEXT NOT NULL REFERENCES workspace(id) ON DELETE CASCADE,
+  channel_id TEXT NOT NULL REFERENCES channel(id) ON DELETE CASCADE,
+  thread_id TEXT REFERENCES thread(id) ON DELETE SET NULL,
+  agent_id TEXT NOT NULL REFERENCES agent(id) ON DELETE CASCADE,
+  runtime TEXT,                          -- expected runtime (informational; instance runtime at creation)
+  state TEXT NOT NULL DEFAULT 'pending'
+       CHECK (state IN ('pending','claimed','done','failed','dead')),
+  payload TEXT NOT NULL,                 -- JSON snapshot consumed by the runtime
+  result TEXT,                           -- JSON {ok, replyBody?, error?} filled on done/failed
+  claimed_by_machine TEXT REFERENCES machine(id) ON DELETE SET NULL,
+  claimed_at INTEGER,
+  completed_at INTEGER,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_dispatch_pending ON dispatch(state, created_at);
+CREATE INDEX IF NOT EXISTS idx_dispatch_agent ON dispatch(agent_id, state);
+CREATE INDEX IF NOT EXISTS idx_dispatch_delivery ON dispatch(delivery_id);

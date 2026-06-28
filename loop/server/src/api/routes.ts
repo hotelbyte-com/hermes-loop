@@ -10,16 +10,31 @@ import { newId, now } from '../db/id.ts'
 import type { BroadcastPolicy, ContextScope, MemberKind } from '../delivery/types.ts'
 import { postMessage } from './delivery-service.ts'
 import {
+  abandonDispatch,
+  authMachineByToken,
+  claimDispatch,
+  completeDispatch,
+  heartbeat,
+  HttpError,
+  pollDispatches,
+  registerMachine,
+  upsertInstance,
+} from './dispatch-service.ts'
+import {
   broadcastPolicySchema,
   type AgentView,
   type ChannelView,
   type HumanView,
+  type MachineView,
   type WorkspaceView,
+  zAddMember,
   zCreateChannel,
   zCreateThread,
   zCreateWorkspace,
   zPostMessage,
-  zAddMember,
+  zRegisterMachine,
+  zUpsertInstance,
+  zCompleteDispatch,
 } from './contract.ts'
 import {
   channelView,
@@ -38,6 +53,28 @@ function bad(c: Context, error: string) {
 
 function notFound(c: Context, error: string) {
   return c.json({ error }, 404)
+}
+
+// Map a service-layer HttpError to its literal status (Hono's c.json accepts these verbatim).
+// Non-HttpError throws fall through to app.onError (500).
+function errResponse(c: Context, e: unknown): Response {
+  if (e instanceof HttpError) {
+    const s = e.status
+    if (s === 400) return c.json({ error: e.message }, 400)
+    if (s === 401) return c.json({ error: e.message }, 401)
+    if (s === 403) return c.json({ error: e.message }, 403)
+    if (s === 404) return c.json({ error: e.message }, 404)
+    return c.json({ error: e.message }, 409) // only 409 remains in the union
+  }
+  throw e
+}
+
+// Authorization: Bearer <token> scheme parsing (HTTP protocol), not message/behavior routing.
+function bearerOf(c: Context): string | undefined {
+  const h = c.req.header('authorization')
+  if (!h) return undefined
+  const m = /^Bearer\s+(.+)$/i.exec(h)
+  return m ? m[1].trim() : undefined
 }
 
 export function buildApp(db: Db): Hono {
@@ -279,6 +316,110 @@ export function buildApp(db: Db): Hono {
       c.req.param('mid'),
     )
     return c.json(rows.map((r) => ({ ...r, recipientHandle: handleOf(db, r.recipient_id, r.recipient_kind), wake: r.wake === 1 })))
+  })
+
+  // ---------- machines + instances (runtime bridge setup, D-024) ----------
+
+  app.get('/api/workspaces/:wid/machines', (c) => {
+    const rows = db.all<{
+      id: string
+      workspace_id: string
+      name: string
+      owner: string | null
+      token_suffix: string | null
+    }>(
+      'SELECT id, workspace_id, name, owner, token_suffix FROM machine WHERE workspace_id = ? ORDER BY created_at',
+      c.req.param('wid'),
+    )
+    const views: MachineView[] = rows.map((r) => ({
+      id: r.id,
+      workspaceId: r.workspace_id,
+      name: r.name,
+      owner: r.owner,
+      tokenSuffix: r.token_suffix,
+    }))
+    return c.json(views)
+  })
+
+  app.post('/api/workspaces/:wid/machines', async (c) => {
+    const wid = c.req.param('wid')
+    const ws = db.get<{ id: string }>('SELECT id FROM workspace WHERE id = ?', wid)
+    if (!ws) return notFound(c, 'workspace not found')
+    const parsed = zRegisterMachine.safeParse(await c.req.json().catch(() => null))
+    if (!parsed.success) return bad(c, parsed.error.message)
+    try {
+      const { machine, token } = registerMachine(db, wid, parsed.data.name, parsed.data.owner ?? null)
+      return c.json({ ...machine, token }, 201)
+    } catch (e) {
+      return errResponse(c, e)
+    }
+  })
+
+  app.post('/api/workspaces/:wid/agents/:aid/instances', async (c) => {
+    const wid = c.req.param('wid')
+    const ws = db.get<{ id: string }>('SELECT id FROM workspace WHERE id = ?', wid)
+    if (!ws) return notFound(c, 'workspace not found')
+    const parsed = zUpsertInstance.safeParse(await c.req.json().catch(() => null))
+    if (!parsed.success) return bad(c, parsed.error.message)
+    try {
+      return c.json(upsertInstance(db, wid, c.req.param('aid'), parsed.data), 200)
+    } catch (e) {
+      return errResponse(c, e)
+    }
+  })
+
+  // ---------- machine runtime bridge (bearer-authed) ----------
+
+  app.post('/api/machines/:mid/heartbeat', (c) => {
+    const mid = c.req.param('mid')
+    try {
+      const auth = authMachineByToken(db, bearerOf(c))
+      if (auth.id !== mid) return c.json({ error: 'token does not match machine' }, 403)
+      return c.json(heartbeat(db, mid))
+    } catch (e) {
+      return errResponse(c, e)
+    }
+  })
+
+  app.get('/api/machines/:mid/dispatches', (c) => {
+    const mid = c.req.param('mid')
+    const limit = Math.min(Math.max(Number(c.req.query('limit') ?? 16), 1), 64)
+    try {
+      const auth = authMachineByToken(db, bearerOf(c))
+      if (auth.id !== mid) return c.json({ error: 'token does not match machine' }, 403)
+      return c.json(pollDispatches(db, mid, limit))
+    } catch (e) {
+      return errResponse(c, e)
+    }
+  })
+
+  app.post('/api/dispatches/:id/claim', (c) => {
+    try {
+      const auth = authMachineByToken(db, bearerOf(c))
+      return c.json(claimDispatch(db, c.req.param('id'), auth), 200)
+    } catch (e) {
+      return errResponse(c, e)
+    }
+  })
+
+  app.post('/api/dispatches/:id/complete', async (c) => {
+    const parsed = zCompleteDispatch.safeParse(await c.req.json().catch(() => null))
+    if (!parsed.success) return bad(c, parsed.error.message)
+    try {
+      const auth = authMachineByToken(db, bearerOf(c))
+      return c.json(completeDispatch(db, c.req.param('id'), auth, parsed.data), 200)
+    } catch (e) {
+      return errResponse(c, e)
+    }
+  })
+
+  app.post('/api/dispatches/:id/abandon', (c) => {
+    try {
+      const auth = authMachineByToken(db, bearerOf(c))
+      return c.json(abandonDispatch(db, c.req.param('id'), auth), 200)
+    } catch (e) {
+      return errResponse(c, e)
+    }
   })
 
   // ---------- seed ----------

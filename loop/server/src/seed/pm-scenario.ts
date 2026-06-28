@@ -7,11 +7,14 @@ import type { Db } from '../db/client.ts'
 import { newId, now } from '../db/id.ts'
 import type { BroadcastPolicy, MemberKind } from '../delivery/types.ts'
 import { postMessage } from '../api/delivery-service.ts'
+import { hashToken } from '../api/dispatch-service.ts'
+import { readMachineConfig, writeMachineConfig } from '../cli/machine-config.ts'
 
 export type PmSeedResult = {
   workspaceId: string
   channelId: string
   aliceId: string
+  machineId: string
   botAgentIds: Record<string, string>
   demoMessages: number
 }
@@ -44,6 +47,7 @@ export function seedPmScenario(db: Db): PmSeedResult {
 
   const channelId = upsertChannel(db, wid)
   const machineId = upsertMachine(db, wid, 'alice-mbp')
+  ensureMachineToken(db, machineId)
   const aliceId = upsertHuman(db, wid, 'Alice')
   upsertHuman(db, wid, 'Bob')
 
@@ -87,7 +91,39 @@ export function seedPmScenario(db: Db): PmSeedResult {
     demoMessages = 3
   }
 
-  return { workspaceId: wid, channelId, aliceId, botAgentIds, demoMessages }
+  return { workspaceId: wid, channelId, aliceId, machineId, botAgentIds, demoMessages }
+}
+
+// Provision an opaque bearer for the demo machine and persist it to .data/machine.json
+// so `pnpm machine` can act as the runtime bridge out of the box. Reuses an existing
+// valid token across re-seeds (so a running machine CLI is not invalidated); reissues
+// only when the machine has no token or the local config file is gone/stale.
+function ensureMachineToken(db: Db, machineId: string): void {
+  const row = db.get<{ token_hash: string | null }>(
+    'SELECT token_hash FROM machine WHERE id = ?',
+    machineId,
+  )
+  const file = readMachineConfig()
+  if (
+    file &&
+    file.machineId === machineId &&
+    row?.token_hash &&
+    row.token_hash === hashToken(file.token)
+  ) {
+    return // existing token still valid + on disk
+  }
+  const token = newId('mch')
+  db.run(
+    'UPDATE machine SET token_hash = ?, token_suffix = ? WHERE id = ?',
+    hashToken(token),
+    token.slice(-4),
+    machineId,
+  )
+  writeMachineConfig({
+    machineId,
+    token,
+    baseUrl: process.env.LOOP_BASE_URL ?? 'http://127.0.0.1:8188',
+  })
 }
 
 function upsertChannel(db: Db, wid: string): string {

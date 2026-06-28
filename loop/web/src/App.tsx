@@ -22,9 +22,20 @@ const STATE_META: Record<DeliveryView['state'], { label: string; cls: string; ic
   deferred: { label: '延后', cls: 'st-deferred', icon: '🕓' },
 }
 
-// Highlight @tokens in the body. This is presentation only — it does not influence
-// delivery (the server's parser owns tokenization). Mirrors parser.ts's regex.
-const TOKEN_RE = /(@[^\s@,;:!>()\[\]{}"']+)/g
+// Runtime dispatch lifecycle badge (D-024). A wake delivery to an agent spawns a
+// dispatch; this shows where it is in pending → claimed → done.
+const DISPATCH_META: Record<string, string> = {
+  pending: '⏳ 待执行',
+  claimed: '⚙️ 执行中',
+  done: '✅ 已回写',
+  failed: '❌ 失败',
+  dead: '☠️ 死信',
+}
+
+// Highlight @tokens in the body. Presentation only — the server's parser owns tokenization.
+// Mirrors parser.ts's MENTION_RE: handle = Unicode letters/digits/_/-, so CJK punctuation
+// (。）！ etc.) terminates a token just like ASCII punctuation does.
+const TOKEN_RE = /(@[\p{L}\p{N}_-]+)/gu
 function renderBody(body: string, mentions: MessageView['mentions']) {
   const memberHandles = new Set(
     mentions.filter((m) => m.kind === 'member').map((m) => (m.handle ?? '').toLowerCase()),
@@ -160,34 +171,15 @@ export function App() {
       })
       setMessages((prev) => [...prev, message])
       setText('')
-      // Simulate a bot reply on direct mention (MVP has no real runtime yet — runtime
-      // is external per D-021; this keeps the collaboration loop visibly alive).
-      if (authorKind === 'human') {
-        const mentioned = message.deliveries.find(
-          (d) => d.reasonCode === 'DIRECT_MENTION' && d.recipientKind === 'agent' && d.state === 'delivered',
-        )
-        const agent = mentioned ? agents.find((a) => a.id === mentioned.recipientId) : null
-        if (agent) {
-          setTimeout(async () => {
-            try {
-              const { message: reply } = await api.postMessage(activeChannel.id, {
-                body: `🤖（模拟回复）收到，我（${agent.displayName}）开始处理。${agent.online ? '' : '（我当前离线，正式 runtime 接入后真实执行）'}`,
-                authorId: agent.id,
-                authorKind: 'agent',
-              })
-              setMessages((prev) => [...prev, reply])
-            } catch {
-              /* ignore simulated-reply errors */
-            }
-          }, 1400)
-        }
-      }
+      // No client-side fake reply: a wake delivery now spawns a REAL dispatch (D-024).
+      // Run `pnpm machine` to have a runtime claim it and post back a real agent reply,
+      // which arrives here via the 4s poll. The diagnostics panel shows ⏳ 待执行 meanwhile.
     } catch (e) {
       setError(String(e))
     } finally {
       setSending(false)
     }
-  }, [activeChannel, text, authorId, authorKind, sending, agents])
+  }, [activeChannel, text, authorId, authorKind, sending])
 
   const insertMention = (handle: string) => {
     setText((t) => (t.endsWith(' ') || t === '' ? `${t}@${handle} ` : `${t} @${handle} `))
@@ -326,14 +318,14 @@ function MessageCard({ m, open, onToggle }: { m: MessageView; open: boolean; onT
   const deferred = m.deliveries.filter((d) => d.state === 'deferred')
   const excluded = m.deliveries.filter((d) => d.state === 'excluded')
   const order: DeliveryView[] = [...delivered, ...deferred, ...excluded]
-  const simulated = m.authorKind === 'agent'
+  const agent = m.authorKind === 'agent'
 
   return (
-    <div className={`message ${simulated ? 'simulated' : ''}`}>
+    <div className="message">
       <div className="msg-head">
         <span className={`avatar ${m.authorKind}`}>{m.authorHandle.slice(0, 2)}</span>
         <span className="author">{m.authorHandle}</span>
-        {simulated && <span className="tag">🤖 模拟</span>}
+        {agent && <span className="tag">agent</span>}
         <span className="time">{fmtTime(m.createdAt)}</span>
       </div>
       <div className="msg-body">{renderBody(m.body, m.mentions)}</div>
@@ -361,6 +353,11 @@ function MessageCard({ m, open, onToggle }: { m: MessageView; open: boolean; onT
                 <span className="d-state">{meta.label}</span>
                 <span className="d-reason">{d.reasonCode}</span>
                 {d.wake && <span className="d-wake">🔔 唤醒</span>}
+                {d.dispatch && (
+                  <span className={`d-dispatch dsp-${d.dispatch.state}`}>
+                    {DISPATCH_META[d.dispatch.state] ?? d.dispatch.state}
+                  </span>
+                )}
               </div>
             )
           })}
