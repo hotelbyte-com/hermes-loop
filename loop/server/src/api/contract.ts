@@ -89,6 +89,13 @@ export const zUpdateTaskStatus = z.object({
   status: taskStatus,
 })
 
+// D-026: assign a task to an agent in a channel. assigneeId + channelId are required;
+// assignment synthesizes the 4th explicit wake (see api/task-service.ts assignTask).
+export const zAssignTask = z.object({
+  assigneeId: z.string().min(1),
+  channelId: z.string().min(1),
+})
+
 export type PostMessageInput = z.infer<typeof zPostMessage>
 
 // ---------- output views ----------
@@ -112,12 +119,13 @@ export type DeliveryView = {
 
 export type DispatchState = 'pending' | 'claimed' | 'done' | 'failed' | 'dead'
 
-export type DispatchResultView = { ok: boolean; replyBody?: string; error?: string }
+export type DispatchResultView = { ok: boolean; replyBody?: string; error?: string; notice?: string }
 
 export type DispatchView = {
   id: string
   messageId: string
   deliveryId: string
+  taskId: string | null
   channelId: string
   threadId: string | null
   agentId: string
@@ -213,5 +221,6 @@ export type TaskView = {
   assigneeHandle: string | null
   title: string
   status: TaskStatus
+  assignmentMessageId: string | null
   createdAt: number
 }

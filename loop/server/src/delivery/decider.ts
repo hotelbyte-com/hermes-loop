@@ -41,6 +41,7 @@ export function decideDelivery(input: DeliveryInput): DeliveryResult {
     scope,
     threadParticipantIds,
     candidates,
+    taskAssigneeIds,
   } = input
 
   const mentionedIds = new Set(mentions.filter(isMemberMention).map((m) => m.memberId))
@@ -78,6 +79,14 @@ export function decideDelivery(input: DeliveryInput): DeliveryResult {
       !mentionedIds.has(c.memberId)
     ) {
       verdicts.push(deny(c, 'EXCLUDED_CONTEXT_SCOPE', 'thread scope: not a thread participant', 'scope.thread'))
+      continue
+    }
+    // 2.5) Task assignment wake — the 4th explicit wake (D-026). MUST precede DIRECT_MENTION so
+    // the synthesized assignment message (whose mentions DELIBERATELY omit the assignee member
+    // token) resolves here, keeping TASK_ASSIGNEE reachable and distinguishing woken-by-assignment
+    // from woken-by-@. Driven entirely by the structured taskAssigneeIds field, never body parsing.
+    if (c.memberKind === 'agent' && taskAssigneeIds?.has(c.memberId)) {
+      verdicts.push(allow(c, true, 'TASK_ASSIGNEE', 'task assigned', 'task.assignee'))
       continue
     }
     // 3) Direct @mention always wins.

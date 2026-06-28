@@ -23,6 +23,8 @@ import {
   upsertInstance,
 } from './dispatch-service.ts'
 import {
+  assignTask,
+  cancelTask,
   createTask,
   getTask,
   listTasks,
@@ -46,6 +48,7 @@ import {
   zUpsertInstance,
   zCompleteDispatch,
   zUpdateTaskStatus,
+  zAssignTask,
 } from './contract.ts'
 import {
   channelView,
@@ -519,6 +522,31 @@ export function buildApp(db: Db): Hono {
     if (!parsed.success) return bad(c, parsed.error.message)
     try {
       return c.json(updateTaskStatus(db, c.req.param('wid'), c.req.param('tid'), parsed.data.status))
+    } catch (e) {
+      return errResponse(c, e)
+    }
+  })
+
+  // D-026: task<->dispatch combo. Assigning a task synthesizes the 4th explicit wake
+  // (assignment message authored by the system agent -> decideDelivery TASK_ASSIGNEE ->
+  // exactly one dispatch anchored to the task). Cancelling marks the task cancelled and
+  // dead-letters its non-terminal dispatches (a late complete is 409, no duplicate reply).
+  app.post('/api/workspaces/:wid/tasks/:tid/assign', async (c) => {
+    const wid = c.req.param('wid')
+    const ws = db.get<{ id: string }>('SELECT id FROM workspace WHERE id = ?', wid)
+    if (!ws) return notFound(c, 'workspace not found')
+    const parsed = zAssignTask.safeParse(await c.req.json().catch(() => null))
+    if (!parsed.success) return bad(c, parsed.error.message)
+    try {
+      return c.json(assignTask(db, wid, c.req.param('tid'), parsed.data), 200)
+    } catch (e) {
+      return errResponse(c, e)
+    }
+  })
+
+  app.post('/api/workspaces/:wid/tasks/:tid/cancel', (c) => {
+    try {
+      return c.json(cancelTask(db, c.req.param('wid'), c.req.param('tid')), 200)
     } catch (e) {
       return errResponse(c, e)
     }

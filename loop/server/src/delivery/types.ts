@@ -9,6 +9,7 @@ export type MemberKind = 'human' | 'agent'
 // A closed enum of delivery outcomes. Every MessageDelivery row carries one.
 export type ReasonCode =
   | 'DIRECT_MENTION'              // explicitly @mentioned (parsed token)
+  | 'TASK_ASSIGNEE'               // assigned to a task -> woken (D-026 4th explicit wake)
   | 'CHANNEL_BROADCAST'           // channel default audience includes all members (silent)
   | 'ALL_BROADCAST'               // @all hit and policy allowed
   | 'ONLINE_BROADCAST'            // @online hit and member was online
@@ -52,6 +53,11 @@ export type DeliveryInput = {
   scope: ContextScope
   threadParticipantIds?: Set<string>
   candidates: Candidate[]
+  // D-026: the set of agent assignees woken by a task assignment (the synthesized
+  // assignment message). Drives the TASK_ASSIGNEE wake entirely from this structured
+  // field, NOT from body parsing — the assignment body deliberately omits the assignee
+  // member token so step 3 DIRECT_MENTION cannot pre-empt step 2.5 (decider.ts).
+  taskAssigneeIds?: Set<string>
 }
 
 export type DeliveryVerdict = {

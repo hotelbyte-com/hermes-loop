@@ -10,12 +10,16 @@
 // Uses node:test (built-in, zero deps) against an in-memory node:sqlite DB.
 
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
 
 import { newId, now } from '../db/id.ts'
 import { createStore } from '../store.ts'
 import { postMessage } from '../api/delivery-service.ts'
 import {
+  abandonDispatch,
   authMachineByToken,
   claimDispatch,
   claimTtlMs,
@@ -29,6 +33,7 @@ import {
   requeueStaleClaimed,
   upsertInstance,
 } from '../api/dispatch-service.ts'
+import { assignTask, cancelTask, createTask, getTask } from '../api/task-service.ts'
 import type { BroadcastPolicy } from '../delivery/types.ts'
 
 const QUIET: BroadcastPolicy = { defaultAudience: 'mentioned', allowAtAll: true, allowAtOnline: true }
@@ -40,6 +45,7 @@ type Fixture = {
   hid: string
   a1: string
   a2: string
+  sysId: string
   machineId: string
   auth: { id: string; workspaceId: string }
 }
@@ -53,16 +59,22 @@ function fixture(): Fixture {
     'INSERT INTO channel(id, workspace_id, name, kind, broadcast_policy, context_scope, created_at) VALUES (?,?,?,?,?,?,?)',
     cid, wid, 'test', 'channel', JSON.stringify(QUIET), 'channel', now(),
   )
-  const mkAgent = (display: string): string => {
+  const mkAgent = (display: string, role: 'member' | 'system' = 'member'): string => {
     const sid = newId('soul')
-    db.run('INSERT INTO soul(id, workspace_id, name, kind, role, description, created_at) VALUES (?,?,?,?,?,?,?)', sid, wid, display, 'agent', display, '', now())
+    db.run('INSERT INTO soul(id, workspace_id, name, kind, role, description, created_at) VALUES (?,?,?,?,?,?,?)', sid, wid, display, 'agent', role, '', now())
     const aid = newId('agt')
-    db.run('INSERT INTO agent(id, workspace_id, soul_id, display_name, created_at) VALUES (?,?,?,?,?)', aid, wid, sid, display, now())
+    db.run('INSERT INTO agent(id, workspace_id, soul_id, display_name, role, created_at) VALUES (?,?,?,?,?,?)', aid, wid, sid, display, role, now())
     db.run('INSERT INTO channel_member(channel_id, member_id, member_kind) VALUES (?,?,?)', cid, aid, 'agent')
     return aid
   }
   const a1 = mkAgent('SpecBot')
   const a2 = mkAgent('ResearcherBot')
+  // D-026 system ghost author — needed by assignTask. Not a channel member (it only authors),
+  // and has no instance (not a runtime target).
+  const sysSoul = newId('soul')
+  db.run('INSERT INTO soul(id, workspace_id, name, kind, role, description, created_at) VALUES (?,?,?,?,?,?,?)', sysSoul, wid, 'System', 'agent', 'system', '', now())
+  const sysId = newId('agt')
+  db.run('INSERT INTO agent(id, workspace_id, soul_id, display_name, role, created_at) VALUES (?,?,?,?,?,?)', sysId, wid, sysSoul, 'System', 'system', now())
   const hid = newId('hum')
   db.run('INSERT INTO human(id, workspace_id, name, created_at) VALUES (?,?,?,?)', hid, wid, 'Alice', now())
   db.run('INSERT INTO channel_member(channel_id, member_id, member_kind) VALUES (?,?,?)', cid, hid, 'human')
@@ -71,7 +83,7 @@ function fixture(): Fixture {
   for (const aid of [a1, a2]) {
     upsertInstance(db, wid, aid, { machineId: machine.id, runtime: 'claude-code', online: true })
   }
-  return { db, wid, cid, hid, a1, a2, machineId: machine.id, auth: authMachineByToken(db, token) }
+  return { db, wid, cid, hid, a1, a2, sysId, machineId: machine.id, auth: authMachineByToken(db, token) }
 }
 
 const post = (f: Fixture, body: string) =>
@@ -437,5 +449,113 @@ test('D-027: TTL invariants — instanceTtlMs > claimTtlMs across default / over
   } finally {
     setEnv('LOOP_CLAIM_TTL_MS', prevC)
     setEnv('LOOP_INSTANCE_TTL_MS', prevI)
+  }
+})
+
+// ---------- D-026: task<->dispatch lifecycle coupling + cancel ----------
+
+// 6. claimDispatch auto-couples task open->in_progress (idempotent; re-claim leaves it in_progress).
+test('D-026 claim coupling: claiming an assignment dispatch advances task open->in_progress', () => {
+  const f = fixture()
+  const task = createTask(f.db, f.wid, { title: 'do work' })
+  assignTask(f.db, f.wid, task.id, { assigneeId: f.a1, channelId: f.cid })
+  assert.equal(getTask(f.db, f.wid, task.id).status, 'open', 'task is open until a claim')
+
+  const dsp = pollDispatches(f.db, f.machineId).find((d) => d.taskId === task.id)!
+  claimDispatch(f.db, dsp.id, f.auth)
+  assert.equal(getTask(f.db, f.wid, task.id).status, 'in_progress')
+
+  // Abandon re-claims: re-claiming is idempotent — it stays in_progress (the open->in_progress
+  // UPDATE matches zero rows the second time, which is fine).
+  abandonDispatch(f.db, dsp.id, f.auth) // back to pending
+  claimDispatch(f.db, dsp.id, f.auth) // re-claim
+  assert.equal(getTask(f.db, f.wid, task.id).status, 'in_progress', 're-claim keeps task in_progress')
+  f.db.close()
+})
+
+// 7. completeDispatch with ok -> task in_progress->done; completeDispatch with ok=false (failed)
+//    -> task stays in_progress.
+test('D-026 complete coupling: ok advances in_progress->done; failed leaves it in_progress', () => {
+  const f = fixture()
+  // ok path: done.
+  const task = createTask(f.db, f.wid, { title: 'success' })
+  assignTask(f.db, f.wid, task.id, { assigneeId: f.a1, channelId: f.cid })
+  const dsp = pollDispatches(f.db, f.machineId).find((d) => d.taskId === task.id)!
+  claimDispatch(f.db, dsp.id, f.auth)
+  completeDispatch(f.db, dsp.id, f.auth, { ok: true, replyBody: 'done' })
+  assert.equal(getTask(f.db, f.wid, task.id).status, 'done')
+
+  // failed path: a separate task stays in_progress (one runtime failure must not close it).
+  const task2 = createTask(f.db, f.wid, { title: 'failure' })
+  assignTask(f.db, f.wid, task2.id, { assigneeId: f.a2, channelId: f.cid })
+  const dsp2 = pollDispatches(f.db, f.machineId).find((d) => d.taskId === task2.id)!
+  claimDispatch(f.db, dsp2.id, f.auth)
+  completeDispatch(f.db, dsp2.id, f.auth, { ok: false, error: 'boom' })
+  assert.equal(getTask(f.db, f.wid, task2.id).status, 'in_progress', 'failed complete keeps task in_progress')
+  f.db.close()
+})
+
+// 8. cancelTask -> task cancelled AND every related non-terminal dispatch becomes state dead;
+//    a late completeDispatch on a dead dispatch -> 409 and NO agent reply posted (duplicate-reply = 0).
+test('D-026 cancelTask: kills related dispatches; late complete is 409 with no duplicate reply', () => {
+  const f = fixture()
+  const task = createTask(f.db, f.wid, { title: 'abort' })
+  assignTask(f.db, f.wid, task.id, { assigneeId: f.a1, channelId: f.cid })
+  const dsp = pollDispatches(f.db, f.machineId).find((d) => d.taskId === task.id)!
+  claimDispatch(f.db, dsp.id, f.auth)
+
+  cancelTask(f.db, f.wid, task.id)
+  assert.equal(getTask(f.db, f.wid, task.id).status, 'cancelled')
+  const dead = f.db.get<{ state: string }>('SELECT state FROM dispatch WHERE id = ?', dsp.id)!
+  assert.equal(dead.state, 'dead', 'non-terminal dispatch becomes dead on cancel')
+
+  // A late complete on the dead dispatch -> 409 (state!=='claimed'), and NO agent reply.
+  const before = f.db.get<{ n: number }>(
+    "SELECT COUNT(*) AS n FROM message WHERE channel_id = ? AND author_kind = 'agent'",
+    f.cid,
+  )!.n
+  assert.throws(
+    () => completeDispatch(f.db, dsp.id, f.auth, { ok: true, replyBody: 'late reply should not land' }),
+    (e) => e instanceof HttpError && e.status === 409,
+    'late complete on a dead dispatch must be 409',
+  )
+  const after = f.db.get<{ n: number }>(
+    "SELECT COUNT(*) AS n FROM message WHERE channel_id = ? AND author_kind = 'agent'",
+    f.cid,
+  )!.n
+  assert.equal(after, before, 'no duplicate agent reply from a late complete on a cancelled task')
+  f.db.close()
+})
+
+// 10. hard-ban: the agent routing/wake/lifecycle paths contain zero strings.Contains / keyword
+//     tables. Fails on forbidden patterns (.contains/.indexOf/substring routing) outside the
+//     single allowed carve-out (delivery/parser.ts @mention tokenization).
+test('D-026 hard-ban: no new body-substring routing (no .contains/.indexOf keyword tables) outside parser.ts', () => {
+  const here = dirname(fileURLToPath(import.meta.url))
+  const srcDir = join(here, '..')
+  const files = [
+    'api/delivery-service.ts',
+    'api/dispatch-service.ts',
+    'api/task-service.ts',
+    'api/routes.ts',
+    'delivery/decider.ts',
+    'delivery/types.ts',
+    'seed/pm-scenario.ts',
+  ]
+  // Forbids substring routing on message bodies / agent decisions. The decider already forbids
+  // body inspection by construction; this guards against regressions that reintroduce keyword
+  // matching. parser.ts (the documented @mention tokenizer carve-out) is intentionally excluded.
+  const FORBIDDEN = /\.contains\s*\(|\.indexOf\s*\(|\.includes\s*\(['"]/i
+  for (const rel of files) {
+    const src = readFileSync(join(srcDir, rel), 'utf8')
+    const hits = src.split('\n').reduce<string[]>((acc, line, i) => {
+      if (FORBIDDEN.test(line)) acc.push(`${rel}:${i + 1}: ${line.trim()}`)
+      return acc
+    }, [])
+    assert.equal(
+      hits.length,
+      0,
+      `${rel} must not use substring/keyword routing (hard-ban). Hits:\n${hits.join('\n')}`,
+    )
   }
 })

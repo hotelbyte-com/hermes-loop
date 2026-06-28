@@ -16,6 +16,10 @@ export type PmSeedResult = {
   aliceId: string
   machineId: string
   botAgentIds: Record<string, string>
+  // The seeded system ghost agent (role='system') that authors synthesized task-assignment
+  // messages (D-026). message.author_kind stays closed at ('human','agent') — the system
+  // agent is an AGENT row, not a new author_kind enum value.
+  systemAgentId: string
   demoMessages: number
 }
 
@@ -63,6 +67,12 @@ export function seedPmScenario(db: Db): PmSeedResult {
     )
   }
 
+  // D-026: seed the system ghost agent (idempotent). It authors synthesized task-assignment
+  // messages; it is an ordinary agent row with role='system' (NOT a member of any channel —
+  // it never receives messages, only authors them). Not a runtime target: no instance.
+  const systemSoulId = upsertSoul(db, wid, 'System', 'system', 'system ghost author for task assignment')
+  const systemAgentId = upsertAgent(db, wid, systemSoulId, 'System', 'system')
+
   db.run(
     'INSERT OR IGNORE INTO channel_member(channel_id, member_id, member_kind, role) VALUES (?,?,?,?)',
     channelId, aliceId, 'human', 'owner',
@@ -91,7 +101,7 @@ export function seedPmScenario(db: Db): PmSeedResult {
     demoMessages = 3
   }
 
-  return { workspaceId: wid, channelId, aliceId, machineId, botAgentIds, demoMessages }
+  return { workspaceId: wid, channelId, aliceId, machineId, botAgentIds, systemAgentId, demoMessages }
 }
 
 // Provision an opaque bearer for the demo machine and persist it to .data/machine.json
@@ -180,15 +190,22 @@ function upsertSoul(db: Db, wid: string, name: string, role: string, desc: strin
   ).id
 }
 
-function upsertAgent(db: Db, wid: string, soulId: string, display: string): string {
+// role defaults to 'member'; the D-026 system ghost author passes 'system'. On INSERT the
+// role column is set explicitly (the schema default 'member' is the fallback for legacy rows).
+function upsertAgent(db: Db, wid: string, soulId: string, display: string, role: 'member' | 'system' = 'member'): string {
   const existing = db.get<{ id: string }>(
     'SELECT id FROM agent WHERE workspace_id = ? AND display_name = ?',
     wid, display,
   )
-  return existing?.id ?? createRow(
+  if (existing) {
+    // Keep role consistent across re-seeds (a re-seed with a different role upgrades it).
+    db.run('UPDATE agent SET role = ? WHERE id = ?', role, existing.id)
+    return existing.id
+  }
+  return createRow(
     db,
-    'INSERT INTO agent(id, workspace_id, soul_id, display_name, created_at) VALUES (?,?,?,?,?)',
-    [newId('agt'), wid, soulId, display, now()],
+    'INSERT INTO agent(id, workspace_id, soul_id, display_name, role, created_at) VALUES (?,?,?,?,?,?)',
+    [newId('agt'), wid, soulId, display, role, now()],
   ).id
 }
 
