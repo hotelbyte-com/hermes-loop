@@ -9,7 +9,9 @@
     "dev:web": "pnpm --filter ./web dev",
     "build:web": "pnpm --filter ./web build",
     "typecheck": "pnpm -r typecheck",
-    "seed": "pnpm --filter ./server seed"
+    "seed": "pnpm --filter ./server seed",
+    "machine": "pnpm --filter ./server machine",
+    "test": "pnpm --filter ./server test"
   },
   "pnpm": {
     "onlyBuiltDependencies": ["esbuild"]

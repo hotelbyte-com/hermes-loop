@@ -31,16 +31,18 @@ loop/
 ```bash
 cd loop
 pnpm install
-pnpm dev:server      # http://127.0.0.1:8188  (另开终端)
-pnpm dev:web         # http://127.0.0.1:5188
+pnpm seed          # 建库 + PM 场景 + 颁发 machine token（写入 .data/machine.json）
+pnpm dev:server    # http://127.0.0.1:8188  (另开终端)
+pnpm dev:web       # http://127.0.0.1:5188
+pnpm machine       # (再开一终端) runtime 桥：轮询 dispatch，把 wake 消息真正跑起来
 ```
 
-首屏点 **Seed PM scenario**，即可在 `#pm-delivery` 发消息、看投递诊断面板。
+Web 首屏自动 seed `#pm-delivery`。`@SpecBot` 会生成一条 `⏳ 待执行` 的 dispatch；`pnpm machine` 一跑，runtime 认领并回写真实 agent 回复（诊断面板变 `✅ 已回写`）。
 
-## 投递诊断（demo 亮点）
+## 投递诊断（护城河）
 
 发 `@SpecBot 帮我把 BRD 整理成 PRD`：
-- ✅ SpecBot → `delivered` · `DIRECT_MENTION` · wake=true
+- ✅ SpecBot → `delivered` · `DIRECT_MENTION` · wake + `⏳ 待执行`（生成 dispatch，待 runtime 认领）
 - ⛔ ResearcherBot/DesignBot/EngBot → `excluded` · `EXCLUDED_NOT_MENTIONED`（默认静默，不被打扰）
 
 发 `@all 同步一下进度`（频道允许 `@all`）：
@@ -50,7 +52,25 @@ pnpm dev:web         # http://127.0.0.1:5188
 - ✅ 在线成员 → `delivered` · `ONLINE_BROADCAST`
 - 🕓 DesignBot → `deferred` · `DEFERRED_OFFLINE`
 
+## Runtime 执行桥（M2，D-024）
+
+runtime **外部化**（D-021）：中央服务器只调度投递、**永不执行 runtime**。一条 wake 到 agent 的投递会落成一条 `dispatch`（目标=该 agent），任意托管了该 agent **在线 instance** 的 Machine 都可轮询/认领/完成。`complete` 带 `replyBody` 时，runtime 输出经同一条 `postMessage` 临界路径回写为 agent 消息——回复会**再次进入决策器**，其投递诊断与原始 wake 串联可审计。
+
+```
+人 @SpecBot → message + delivery(wake) + dispatch(pending)
+                                     ↓ machine 轮询（结构化：该机器有此 agent 的在线 instance）
+                               claim (CAS pending→claimed)
+                                     ↓ runtime 本地执行（claude-code / opencode / 任意命令 / 内置 stub）
+                              complete(replyBody) → agent 回写消息 → 自身 delivery 诊断
+```
+
+- **接入真实 runtime**：`pnpm machine --exec claude -p`（payload JSON 走 stdin，stdout 即回复）。默认内置 stub，零依赖可演示桥。
+- **离线队列**：直接 `@` 一个离线 agent → dispatch 进入 `pending` 等待；把该 agent 的 instance 置 `online=true`（`POST /api/workspaces/:wid/agents/:aid/instances`）后，下次轮询即被认领执行。
+- **Machine 鉴权**：`POST /api/workspaces/:wid/machines` 颁发 opaque token（仅存 sha256）；dispatch 相关端点走 `Authorization: Bearer <token>`。
+
 ## 状态
 
-M1（中央服务器消息+投递闭环）进行中。M2+ = Machine 客户端 / runtime adapter / 父子任务 / 桌面 app。
-决策依据见 hotel-be 主仓 `docs/architecture/hermes-loop/2026-06-28-hermes-loop-roadmap-investigation.md`。
+**M1**（中央服务器消息+投递闭环）✅ 已交付。
+**M2**（runtime 执行桥：dispatch 生命周期 + machine/instance 注册 + 参考机器客户端）✅ 已交付。
+M3+ = 桌面 app（复用 hermes-workspace）/ 父子任务 / 飞书文档协同 / 多机联邦。
+决策依据见 hotel-be 主仓 `docs/architecture/hermes-loop/2026-06-28-hermes-loop-roadmap-investigation.md`（D-024）。

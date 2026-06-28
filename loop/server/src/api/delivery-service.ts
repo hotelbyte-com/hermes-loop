@@ -14,7 +14,7 @@ import type {
   Mention,
 } from '../delivery/types.ts'
 import type { MessageView } from './contract.ts'
-import { enrichMessage, handleOf, type RawDelivery, type RawMember, type RawMessage } from './views.ts'
+import { enrichMessage, handleOf, type DispatchPayload, type RawDelivery, type RawMember, type RawMessage } from './views.ts'
 
 export type PostMessageArgs = {
   body: string
@@ -82,8 +82,8 @@ function threadParticipants(db: Db, threadId: string): Set<string> {
 
 // Load channel policy/scope, run the decider, persist message + delivery snapshots.
 export function postMessage(db: Db, channelId: string, args: PostMessageArgs): MessageView {
-  const channel = db.get<{ broadcast_policy: string; context_scope: string }>(
-    'SELECT broadcast_policy, context_scope FROM channel WHERE id = ?',
+  const channel = db.get<{ workspace_id: string; broadcast_policy: string; context_scope: string }>(
+    'SELECT workspace_id, broadcast_policy, context_scope FROM channel WHERE id = ?',
     channelId,
   )
   if (!channel) throw new Error(`channel not found: ${channelId}`)
@@ -119,6 +119,7 @@ export function postMessage(db: Db, channelId: string, args: PostMessageArgs): M
   const ts = now()
   const mentionsJson = JSON.stringify(mentions)
   const noticesJson = JSON.stringify(result.notices)
+  const authorHandle = handleOf(db, args.authorId, args.authorKind)
 
   db.transaction(() => {
     db.run(
@@ -135,10 +136,15 @@ export function postMessage(db: Db, channelId: string, args: PostMessageArgs): M
       noticesJson,
       ts,
     )
+    // Persist each delivery verdict, keeping the generated id so we can link a dispatch
+    // to its triggering delivery in the same transaction.
+    const deliveries: { verdict: DeliveryVerdict; deliveryId: string }[] = []
     for (const v of result.verdicts) {
+      const deliveryId = newId('dlv')
+      deliveries.push({ verdict: v, deliveryId })
       db.run(
         'INSERT INTO message_delivery(id, message_id, recipient_id, recipient_kind, delivery_state, wake, reason_code, reason_detail, matched_rule_id, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)',
-        newId('dlv'),
+        deliveryId,
         msgId,
         v.recipientId,
         v.recipientKind,
@@ -150,29 +156,93 @@ export function postMessage(db: Db, channelId: string, args: PostMessageArgs): M
         ts,
       )
     }
+    // D-024 runtime bridge: a WAKE delivery to an agent spawns a dispatch targeting it.
+    // Driven by the structured verdict.wake flag — never substring matching. Quiet default
+    // (CHANNEL_BROADCAST) and DEFERRED_OFFLINE produce no dispatch, preserving the moat:
+    // an offline @online agent is not woken, and a plain channel message does not fan out.
+    for (const { verdict, deliveryId } of deliveries) {
+      if (verdict.recipientKind === 'agent' && verdict.wake && verdict.state === 'delivered') {
+        spawnDispatch(db, {
+          messageId: msgId,
+          deliveryId,
+          workspaceId: channel.workspace_id,
+          channelId,
+          threadId: args.threadId,
+          agentId: verdict.recipientId,
+          reasonCode: verdict.reasonCode,
+          body: args.body,
+          authorId: args.authorId,
+          authorKind: args.authorKind,
+          authorHandle,
+          scope,
+          ts,
+        })
+      }
+    }
   })
 
-  const raw: RawMessage = {
-    id: msgId,
-    channel_id: channelId,
-    thread_id: args.threadId,
-    author_id: args.authorId,
-    author_kind: args.authorKind,
-    body: args.body,
-    mentions: mentionsJson,
-    notices: noticesJson,
-    created_at: ts,
-  }
-  const rawDeliveries: RawDelivery[] = result.verdicts.map((v: DeliveryVerdict) => ({
-    id: '',
-    message_id: msgId,
-    recipient_id: v.recipientId,
-    recipient_kind: v.recipientKind,
-    delivery_state: v.state,
-    wake: v.wake ? 1 : 0,
-    reason_code: v.reasonCode,
-    reason_detail: v.reasonDetail,
-    matched_rule_id: v.matchedRuleId,
-  }))
+  // Reload message + deliveries from the DB so the returned view carries the REAL
+  // delivery ids — needed to resolve the linked dispatch projection (a freshly posted
+  // wake-agent delivery must show its pending dispatch immediately, not only after a
+  // GET reload). One extra read of the row we just wrote; cheap and correct.
+  const raw = db.get<RawMessage>(
+    'SELECT id, channel_id, thread_id, author_id, author_kind, body, mentions, notices, created_at FROM message WHERE id = ?',
+    msgId,
+  )!
+  const rawDeliveries = db.all<RawDelivery>(
+    'SELECT id, message_id, recipient_id, recipient_kind, delivery_state, wake, reason_code, reason_detail, matched_rule_id FROM message_delivery WHERE message_id = ?',
+    msgId,
+  )
   return enrichMessage(db, raw, rawDeliveries)
+}
+
+// Record one runtime dispatch for a wake-agent delivery. Runs inside the caller's
+// transaction so message + deliveries + dispatch commit atomically. `runtime` is the
+// agent's most-recent instance runtime (informational — the dispatch is runtime-agnostic
+// and any eligible machine may claim it). state defaults to 'pending'.
+type SpawnDispatchArgs = {
+  messageId: string
+  deliveryId: string
+  workspaceId: string
+  channelId: string
+  threadId: string | null
+  agentId: string
+  reasonCode: string
+  body: string
+  authorId: string
+  authorKind: MemberKind
+  authorHandle: string
+  scope: ContextScope
+  ts: number
+}
+
+function spawnDispatch(db: Db, a: SpawnDispatchArgs): void {
+  const inst = db.get<{ runtime: string }>(
+    'SELECT runtime FROM instance WHERE agent_id = ? ORDER BY online DESC, last_seen_at DESC LIMIT 1',
+    a.agentId,
+  )
+  const payload: DispatchPayload = {
+    body: a.body,
+    authorId: a.authorId,
+    authorKind: a.authorKind,
+    authorHandle: a.authorHandle,
+    reasonCode: a.reasonCode,
+    // Captured at wake time so the agent reply re-enters the SAME scope the waking
+    // message had (review finding: avoid inheriting the channel row's current scope).
+    contextScope: a.scope,
+    createdAt: a.ts,
+  }
+  db.run(
+    'INSERT INTO dispatch(id, message_id, delivery_id, workspace_id, channel_id, thread_id, agent_id, runtime, payload, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)',
+    newId('dsp'),
+    a.messageId,
+    a.deliveryId,
+    a.workspaceId,
+    a.channelId,
+    a.threadId,
+    a.agentId,
+    inst?.runtime ?? null,
+    JSON.stringify(payload),
+    a.ts,
+  )
 }

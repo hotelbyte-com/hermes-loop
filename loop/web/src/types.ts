@@ -10,7 +10,11 @@ export interface DeliveryView {
   reasonCode: string
   reasonDetail: string
   matchedRuleId: string
+  // Present only when this wake-delivery spawned a runtime dispatch (agent recipients).
+  dispatch?: { state: DispatchState; runtime: string | null } | null
 }
+
+export type DispatchState = 'pending' | 'claimed' | 'done' | 'failed' | 'dead'
 
 export interface NoticeView {
   code: string

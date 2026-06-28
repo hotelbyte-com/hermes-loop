@@ -50,6 +50,23 @@ export const zAddMember = z.object({
   memberKind: memberKind,
 })
 
+export const zRegisterMachine = z.object({
+  name: z.string().min(1).max(80),
+  owner: z.string().max(80).optional(),
+})
+
+export const zUpsertInstance = z.object({
+  machineId: z.string().min(1),
+  runtime: z.string().min(1).max(64),
+  online: z.boolean(),
+})
+
+export const zCompleteDispatch = z.object({
+  ok: z.boolean(),
+  replyBody: z.string().min(1).max(8000).optional(),
+  error: z.string().max(2000).optional(),
+})
+
 export type PostMessageInput = z.infer<typeof zPostMessage>
 
 // ---------- output views ----------
@@ -66,6 +83,53 @@ export type DeliveryView = {
   reasonCode: string
   reasonDetail: string
   matchedRuleId: string
+  // Present only when this wake-delivery spawned a runtime dispatch (agent recipients).
+  // Null otherwise (excluded/deferred/human/quiet-default produce no dispatch).
+  dispatch: { state: DispatchState; runtime: string | null } | null
+}
+
+export type DispatchState = 'pending' | 'claimed' | 'done' | 'failed' | 'dead'
+
+export type DispatchResultView = { ok: boolean; replyBody?: string; error?: string }
+
+export type DispatchView = {
+  id: string
+  messageId: string
+  deliveryId: string
+  channelId: string
+  threadId: string | null
+  agentId: string
+  agentHandle: string
+  runtime: string | null
+  state: DispatchState
+  payload: {
+    body: string
+    authorHandle: string
+    reasonCode: string
+    createdAt: number
+  }
+  result: DispatchResultView | null
+  claimedByMachine: string | null
+  claimedAt: number | null
+  completedAt: number | null
+  createdAt: number
+}
+
+export type MachineView = {
+  id: string
+  workspaceId: string
+  name: string
+  owner: string | null
+  tokenSuffix: string | null
+}
+
+export type InstanceView = {
+  id: string
+  agentId: string
+  machineId: string
+  runtime: string
+  online: boolean
+  lastSeenAt: number | null
 }
 
 export type NoticeView = { code: string; detail: string }

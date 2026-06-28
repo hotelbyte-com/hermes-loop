@@ -110,7 +110,7 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 
 .diagnostics { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
 .delivery {
-  display: grid; grid-template-columns: 24px 130px 80px 1fr auto;
+  display: grid; grid-template-columns: 24px 130px 70px 1fr auto auto;
   align-items: center; gap: 8px; font-size: 12px;
   padding: 5px 10px; border-radius: 6px; background: var(--bg-3);
 }
@@ -124,6 +124,13 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 .st-delivered .d-state { color: var(--delivered); }
 .st-excluded .d-state { color: var(--excluded); }
 .st-deferred .d-state { color: var(--deferred); }
+
+/* runtime dispatch lifecycle badge (D-024) */
+.d-dispatch { font-size: 11px; padding: 1px 7px; border-radius: 999px; white-space: nowrap; }
+.dsp-pending { color: var(--deferred); background: rgba(251,191,36,.12); }
+.dsp-claimed { color: var(--accent); background: rgba(110,168,255,.12); }
+.dsp-done { color: var(--delivered); background: rgba(74,222,128,.12); }
+.dsp-failed, .dsp-dead { color: var(--danger); background: rgba(239,68,68,.12); }
 
 /* ---------- composer ---------- */
 .composer {
@@ -174,6 +181,5 @@ button:disabled { opacity: .4; cursor: not-allowed; }
   color: var(--muted); padding: 40px 20px; text-align: center; line-height: 1.8;
 }
 .empty .inline { display: inline; color: var(--accent); text-decoration: underline; padding: 0; background: none; border: none; font: inherit; cursor: pointer; }
-.message.simulated { border-style: dashed; opacity: .95; }
 .msg-head .tag { font-size: 10px; color: var(--muted); background: var(--bg-3); padding: 1px 6px; border-radius: 999px; }
 

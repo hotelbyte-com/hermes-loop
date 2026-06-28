@@ -18,6 +18,12 @@ export class Db {
   constructor(path: string) {
     this.db = new DatabaseSync(path)
     this.db.exec('PRAGMA journal_mode = WAL;')
+    // synchronous=NORMAL is the WAL-recommended default (full is needlessly slow under WAL).
+    this.db.exec('PRAGMA synchronous = NORMAL;')
+    // busy_timeout: seed CLI / machine CLI / server can all open this file from separate
+    // processes; without a wait, a second writer under WAL gets SQLITE_BUSY -> 500. Wait up
+    // to 5s for the writer lock instead of failing fast (review finding).
+    this.db.exec('PRAGMA busy_timeout = 5000;')
     this.db.exec('PRAGMA foreign_keys = ON;')
   }
 
