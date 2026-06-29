@@ -23,6 +23,12 @@ export type PostMessageArgs = {
   threadId: string | null
   broadcastPolicyOverride: BroadcastPolicy | null
   contextScope: ContextScope | null
+  // D-026: the task this message anchors (set on synthesized assignment messages so the
+  // spawned dispatch carries dispatch.task_id, anchoring it to the task in the same tx).
+  taskId?: string | null
+  // D-026: the agent assignees woken by this message (passed into decideDelivery so the
+  // decider's step 2.5 emits TASK_ASSIGNEE — wake driven structurally, never by body parsing).
+  taskAssigneeIds?: Set<string>
 }
 
 export function buildCandidates(db: Db, channelId: string): Candidate[] {
@@ -113,6 +119,7 @@ export function postMessage(db: Db, channelId: string, args: PostMessageArgs): M
     scope,
     threadParticipantIds,
     candidates,
+    taskAssigneeIds: args.taskAssigneeIds,
   })
 
   const msgId = newId('msg')
@@ -175,6 +182,7 @@ export function postMessage(db: Db, channelId: string, args: PostMessageArgs): M
           authorKind: args.authorKind,
           authorHandle,
           scope,
+          taskId: args.taskId ?? null,
           ts,
         })
       }
@@ -213,6 +221,7 @@ type SpawnDispatchArgs = {
   authorKind: MemberKind
   authorHandle: string
   scope: ContextScope
+  taskId: string | null
   ts: number
 }
 
@@ -233,10 +242,11 @@ function spawnDispatch(db: Db, a: SpawnDispatchArgs): void {
     createdAt: a.ts,
   }
   db.run(
-    'INSERT INTO dispatch(id, message_id, delivery_id, workspace_id, channel_id, thread_id, agent_id, runtime, payload, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)',
+    'INSERT INTO dispatch(id, message_id, delivery_id, task_id, workspace_id, channel_id, thread_id, agent_id, runtime, payload, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
     newId('dsp'),
     a.messageId,
     a.deliveryId,
+    a.taskId,
     a.workspaceId,
     a.channelId,
     a.threadId,

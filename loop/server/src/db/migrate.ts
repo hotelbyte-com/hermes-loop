@@ -18,6 +18,19 @@ export function migrate(db: Db): void {
   ensureColumn(db, 'machine', 'token_hash', 'TEXT')
   ensureColumn(db, 'machine', 'token_suffix', 'TEXT')
   db.exec('CREATE INDEX IF NOT EXISTS idx_machine_token ON machine(token_hash)')
+
+  // D-026: task<->dispatch combo. dispatch.task_id anchors the assignment dispatch to its
+  // task; task.assignment_message_id is the immutable audit projection of the synthesized
+  // assignment message; agent.role discriminates the seeded system ghost author ('system')
+  // from ordinary members ('member'). Added via guarded ALTER (not schema.sql alone) so
+  // existing M1/M2/M3 databases upgrade in place without a reset.
+  ensureColumn(db, 'dispatch', 'task_id', 'TEXT REFERENCES task(id) ON DELETE SET NULL')
+  ensureColumn(db, 'task', 'assignment_message_id', 'TEXT REFERENCES message(id) ON DELETE SET NULL')
+  // SQLite ALTER ADD COLUMN cannot attach a CHECK constraint; role gets CHECK only in
+  // schema.sql (fresh DBs). The ALTER path relies on app-level values (always 'member' |
+  // 'system') — see seed/pm-scenario.ts + task-service.findSystemAgent.
+  ensureColumn(db, 'agent', 'role', "TEXT NOT NULL DEFAULT 'member'")
+  db.exec('CREATE INDEX IF NOT EXISTS idx_dispatch_task ON dispatch(task_id)')
 }
 
 function ensureColumn(db: Db, table: string, column: string, decl: string): void {

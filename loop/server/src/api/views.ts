@@ -131,6 +131,7 @@ export type RawDispatch = {
   id: string
   message_id: string
   delivery_id: string
+  task_id: string | null
   channel_id: string
   thread_id: string | null
   agent_id: string
@@ -164,6 +165,7 @@ export function dispatchToView(db: Db, r: RawDispatch): DispatchView {
     id: r.id,
     messageId: r.message_id,
     deliveryId: r.delivery_id,
+    taskId: r.task_id,
     channelId: r.channel_id,
     threadId: r.thread_id,
     agentId: r.agent_id,
@@ -273,6 +275,7 @@ export type RawTask = {
   assignee_kind: string | null
   title: string
   status: string
+  assignment_message_id: string | null
   created_at: number
 }
 
@@ -289,6 +292,7 @@ export function taskView(db: Db, r: RawTask): TaskView {
       r.assignee_id && assigneeKind ? handleOf(db, r.assignee_id, assigneeKind) : null,
     title: r.title,
     status: r.status as TaskStatus,
+    assignmentMessageId: r.assignment_message_id,
     createdAt: r.created_at,
   }
 }

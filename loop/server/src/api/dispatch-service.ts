@@ -45,7 +45,7 @@ export class HttpError extends Error {
 }
 
 const DISPATCH_COLS =
-  'id, message_id, delivery_id, channel_id, thread_id, agent_id, runtime, state, payload, result, claimed_by_machine, claimed_at, completed_at, created_at'
+  'id, message_id, delivery_id, task_id, channel_id, thread_id, agent_id, runtime, state, payload, result, claimed_by_machine, claimed_at, completed_at, created_at'
 
 export function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex')
@@ -284,6 +284,15 @@ export function claimDispatch(db: Db, dispatchId: string, machine: AuthedMachine
       dispatchId,
     )
     if (r.changes !== 1) throw new HttpError(409, 'dispatch was claimed by another machine')
+    // D-026 lifecycle coupling: a claimed dispatch anchored to a task advances the task
+    // open -> in_progress. Idempotent (0 rows is fine — the task may already be in_progress
+    // from a prior claim cycle or be in another state). Best-effort, inside the claim tx.
+    if (d.task_id) {
+      db.run(
+        "UPDATE task SET status = 'in_progress' WHERE id = ? AND status = 'open'",
+        d.task_id,
+      )
+    }
     return dispatchToView(db, db.get<RawDispatch>(`SELECT ${DISPATCH_COLS} FROM dispatch WHERE id = ?`, dispatchId)!)
   })
 }
@@ -327,6 +336,23 @@ export function completeDispatch(
       machine.id,
     )
     if (upd.changes !== 1) throw new HttpError(409, 'dispatch lease lost (concurrent complete)')
+
+    // D-026 lifecycle coupling: a successful (ok) completion anchored to a task advances the
+    // task in_progress -> done. Idempotent (0 rows is fine — task may be done already, or in
+    // a terminal state from cancel). On failure (ok=false) we do NOT touch the task: one
+    // runtime failure must not close the task — it stays in_progress for a retry/abandon.
+    if (input.ok && d.task_id) {
+      const taskUpd = db.run(
+        "UPDATE task SET status = 'done' WHERE id = ? AND status = 'in_progress'",
+        d.task_id,
+      )
+      if (taskUpd.changes === 0) {
+        // Surface a best-effort notice (not an error): the dispatch completed ok, but the task
+        // had already moved (done/cancelled) — lets the panel explain a done-dispatch whose
+        // task did not advance here.
+        result.notice = 'task already moved out of in_progress; not advanced by this complete'
+      }
+    }
 
     let reply: MessageView | null = null
     if (input.ok && input.replyBody && input.replyBody.trim()) {

@@ -36,11 +36,15 @@ CREATE TABLE IF NOT EXISTS human (
 );
 
 -- Agent: the collaborative role inside a workspace — the @target. Backed by a Soul.
+-- role discriminates ordinary members ('member') from the seeded system ghost author
+-- ('system') that synthesizes task-assignment messages (D-026). The system agent is the
+-- author of record so message.author_kind stays closed at ('human','agent').
 CREATE TABLE IF NOT EXISTS agent (
   id TEXT PRIMARY KEY,
   workspace_id TEXT NOT NULL REFERENCES workspace(id) ON DELETE CASCADE,
   soul_id TEXT NOT NULL REFERENCES soul(id) ON DELETE CASCADE,
   display_name TEXT NOT NULL,
+  role TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('member','system')),
   created_at INTEGER NOT NULL,
   UNIQUE (workspace_id, display_name)
 );
@@ -109,6 +113,7 @@ CREATE TABLE IF NOT EXISTS task (
   assignee_kind TEXT CHECK (assignee_kind IN ('human','agent')),
   title TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'open',
+  assignment_message_id TEXT REFERENCES message(id) ON DELETE SET NULL,
   created_at INTEGER NOT NULL
 );
 
@@ -167,6 +172,7 @@ CREATE TABLE IF NOT EXISTS dispatch (
   id TEXT PRIMARY KEY,
   message_id TEXT NOT NULL REFERENCES message(id) ON DELETE CASCADE,
   delivery_id TEXT NOT NULL REFERENCES message_delivery(id) ON DELETE CASCADE,
+  task_id TEXT REFERENCES task(id) ON DELETE SET NULL,
   workspace_id TEXT NOT NULL REFERENCES workspace(id) ON DELETE CASCADE,
   channel_id TEXT NOT NULL REFERENCES channel(id) ON DELETE CASCADE,
   thread_id TEXT REFERENCES thread(id) ON DELETE SET NULL,
@@ -184,3 +190,4 @@ CREATE TABLE IF NOT EXISTS dispatch (
 CREATE INDEX IF NOT EXISTS idx_dispatch_pending ON dispatch(state, created_at);
 CREATE INDEX IF NOT EXISTS idx_dispatch_agent ON dispatch(agent_id, state);
 CREATE INDEX IF NOT EXISTS idx_dispatch_delivery ON dispatch(delivery_id);
+CREATE INDEX IF NOT EXISTS idx_dispatch_task ON dispatch(task_id);
