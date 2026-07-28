@@ -7,6 +7,7 @@ from dataclasses import asdict, is_dataclass
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, status as http_status
+from starlette.concurrency import run_in_threadpool
 
 from issue_control.ingestion import GitHubWebhookError, MAX_WEBHOOK_BYTES
 from issue_control.runtime import IssueControlRuntime, NotLeaderError
@@ -61,7 +62,8 @@ def create_control_plane_app(
                 )
             body.extend(chunk)
         try:
-            result = runtime.ingest_webhook(
+            result = await run_in_threadpool(
+                runtime.ingest_webhook,
                 headers=dict(request.headers),
                 body=bytes(body),
             )

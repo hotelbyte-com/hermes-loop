@@ -60,7 +60,10 @@ class _Repository:
         }
 
     def issue_session_trace(self, *, issue_key=None, run_id=None, limit=100):
-        assert issue_key in (None, "hotelbyte-com/hotel-be#22338")
+        if issue_key not in (None, "hotelbyte-com/hotel-be#22338"):
+            raise ValueError("issue_key must have the form owner/repo#number")
+        if run_id is not None and not run_id.strip():
+            raise ValueError("run_id filter must be nonblank")
         assert run_id in (None, "reconcile-42")
         assert limit in (100, 5)
         return [
@@ -165,7 +168,19 @@ class _Runtime:
         return {"size": len(body)}
 
 
-def test_production_app_reuses_status_routes_and_bounds_webhook_body() -> None:
+def test_production_app_reuses_status_routes_and_bounds_webhook_body(
+    monkeypatch,
+) -> None:
+    threadpool_calls = []
+
+    async def run_in_threadpool(function, *args, **kwargs):
+        threadpool_calls.append((function, args, kwargs))
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "issue_control.web.run_in_threadpool",
+        run_in_threadpool,
+    )
     app = create_control_plane_app(
         status_service=_service(),
         runtime=_Runtime(),
@@ -183,7 +198,26 @@ def test_production_app_reuses_status_routes_and_bounds_webhook_body() -> None:
             "/github/events",
             content=b"x" * (1_048_576 + 1),
         )
+        accepted = client.post("/github/events", content=b"{}")
 
     assert reconciliation.status_code == 200
     assert reconciliation.json()["issue_sessions"][0]["run_id"] == "reconcile-42"
     assert oversized.status_code == 413
+    assert accepted.status_code == 202
+    assert len(threadpool_calls) == 1
+
+
+def test_reconciliation_trace_filters_reject_invalid_queries() -> None:
+    client = TestClient(create_status_app(_service()))
+
+    invalid_issue = client.get(
+        "/internal/reconciliation",
+        params={"issue_key": "not-an-issue"},
+    )
+    blank_run = client.get(
+        "/internal/reconciliation",
+        params={"run_id": " "},
+    )
+
+    assert invalid_issue.status_code == 422
+    assert blank_run.status_code == 422

@@ -6,7 +6,14 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
-from fastapi import APIRouter, FastAPI, Query, Response, status as http_status
+from fastapi import (
+    APIRouter,
+    FastAPI,
+    HTTPException,
+    Query,
+    Response,
+    status as http_status,
+)
 
 
 class StatusRepository(Protocol):
@@ -162,11 +169,17 @@ def create_status_router(service: InternalStatusService) -> APIRouter:
         run_id: str | None = None,
         limit: int = Query(default=100, ge=1, le=500),
     ) -> dict[str, Any]:
-        return service.reconciliation(
-            issue_key=issue_key,
-            run_id=run_id,
-            limit=limit,
-        )
+        try:
+            return service.reconciliation(
+                issue_key=issue_key,
+                run_id=run_id,
+                limit=limit,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=str(exc),
+            ) from exc
 
     return router
 

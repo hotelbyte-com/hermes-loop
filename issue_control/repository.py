@@ -203,10 +203,10 @@ class PostgresIssueRepository:
                 INSERT INTO issue_control_leases(
                     cluster_name, primary_node, standby_node, renewed_at
                 )
-                VALUES (%s, %s, %s, %s)
+                VALUES (%s, %s, %s, clock_timestamp())
                 ON CONFLICT (cluster_name) DO NOTHING
                 """,
-                (self.cluster_name, primary_node, standby_node, now),
+                (self.cluster_name, primary_node, standby_node),
             )
             cursor.execute(
                 """
@@ -240,7 +240,7 @@ class PostgresIssueRepository:
         with self._transaction() as (_connection, cursor):
             cursor.execute(
                 """
-                SELECT *
+                SELECT *, clock_timestamp() AS database_now
                 FROM issue_control_leases
                 WHERE cluster_name = %s
                 FOR UPDATE
@@ -256,7 +256,8 @@ class PostgresIssueRepository:
                 )
 
             configured_role = "primary" if node_id == row["primary_node"] else "standby"
-            elapsed = now - row["renewed_at"]
+            database_now = row["database_now"]
+            elapsed = database_now - row["renewed_at"]
             current_leader = row["leader_node"]
             epoch = row["lease_epoch"]
 
@@ -278,10 +279,10 @@ class PostgresIssueRepository:
                         last_takeover_at = %s
                     WHERE cluster_name = %s
                     """,
-                    (node_id, epoch, now, now, self.cluster_name),
+                    (node_id, epoch, database_now, database_now, self.cluster_name),
                 )
                 current_leader = node_id
-                renewed_at = now
+                renewed_at = database_now
                 is_leader = True
             elif may_renew:
                 cursor.execute(
@@ -290,9 +291,9 @@ class PostgresIssueRepository:
                     SET renewed_at = %s
                     WHERE cluster_name = %s
                     """,
-                    (now, self.cluster_name),
+                    (database_now, self.cluster_name),
                 )
-                renewed_at = now
+                renewed_at = database_now
                 is_leader = True
             else:
                 renewed_at = row["renewed_at"]
@@ -304,7 +305,7 @@ class PostgresIssueRepository:
                 SET observed_epoch = %s, last_seen_at = %s
                 WHERE node_id = %s
                 """,
-                (epoch, now, node_id),
+                (epoch, database_now, node_id),
             )
             return LeadershipDecision(
                 node_id=node_id,
@@ -376,6 +377,32 @@ class PostgresIssueRepository:
             active_run_id=row["active_run_id"],
             risk_tier=RiskTier(row["risk_tier"]),
             lease_epoch=row["lease_epoch"],
+        )
+
+    def _existing_observation(
+        self,
+        cursor: Cursor[dict[str, Any]],
+        event: IssueEvent,
+    ) -> ObservationResult | None:
+        cursor.execute(
+            "SELECT * FROM issue_events WHERE event_id = %s",
+            (event.event_id,),
+        )
+        existing_event = cursor.fetchone()
+        if not existing_event:
+            return None
+        _assert_same_event(existing_event, event)
+        cursor.execute(
+            "SELECT * FROM issue_sessions WHERE session_id = %s",
+            (existing_event["session_id"],),
+        )
+        existing_session = _required_row(
+            cursor.fetchone(),
+            operation="read duplicate event session",
+        )
+        return ObservationResult(
+            EventDisposition.DUPLICATE,
+            self._session_from_row(existing_session),
         )
 
     def _append_snapshot(
@@ -454,19 +481,27 @@ class PostgresIssueRepository:
                 if lifecycle_number == 1
                 else f"{candidate_session_id}:{lifecycle_number}"
             )
+            initial_context_version = _durable_context_version(
+                state=IssueState.DISCOVERED,
+                state_revision=0,
+                github_version=-1,
+                github_tiebreaker="",
+                lease_epoch=context.lease_epoch,
+            )
             cursor.execute(
                 """
                 INSERT INTO issue_sessions(
                     session_id, issue_key, state, context_version,
                     risk_tier, lease_epoch, started_at, updated_at
                 )
-                VALUES (%s, %s, 'discovered', 1, %s, %s, %s, %s)
+                VALUES (%s, %s, 'discovered', %s, %s, %s, %s, %s)
                 ON CONFLICT (issue_key) WHERE ended_at IS NULL DO NOTHING
                 RETURNING *
                 """,
                 (
                     lifecycle_session_id,
                     canonical_issue_key,
+                    initial_context_version,
                     RiskTier.UNKNOWN.value,
                     context.lease_epoch,
                     now,
@@ -501,16 +536,28 @@ class PostgresIssueRepository:
         if session.lease_epoch > context.lease_epoch:
             raise StaleFenceError("session is already owned by a newer fencing epoch")
         if session.lease_epoch < context.lease_epoch:
+            adopted_context_version = _durable_context_version(
+                state=session.state,
+                state_revision=row["state_revision"],
+                github_version=row["last_github_version"],
+                github_tiebreaker=row["last_github_tiebreaker"],
+                lease_epoch=context.lease_epoch,
+            )
             cursor.execute(
                 """
                 UPDATE issue_sessions
                 SET lease_epoch = %s,
-                    context_version = context_version + 1,
+                    context_version = %s,
                     updated_at = %s
                 WHERE session_id = %s
                 RETURNING *
                 """,
-                (context.lease_epoch, now, session.session_id),
+                (
+                    context.lease_epoch,
+                    adopted_context_version,
+                    now,
+                    session.session_id,
+                ),
             )
             session = self._session_from_row(
                 _required_row(cursor.fetchone(), operation="adopt fencing epoch")
@@ -556,33 +603,9 @@ class PostgresIssueRepository:
     ) -> ObservationResult:
         with self._transaction() as (_connection, cursor):
             self._assert_fence(cursor, context)
-            cursor.execute(
-                """
-                SELECT sessions.*
-                FROM issue_events AS events
-                JOIN issue_sessions AS sessions
-                  ON sessions.session_id = events.session_id
-                WHERE events.event_id = %s
-                """,
-                (event.event_id,),
-            )
-            duplicate_session = cursor.fetchone()
-            if duplicate_session:
-                cursor.execute(
-                    "SELECT * FROM issue_events WHERE event_id = %s",
-                    (event.event_id,),
-                )
-                _assert_same_event(
-                    _required_row(
-                        cursor.fetchone(),
-                        operation="read duplicate event",
-                    ),
-                    event,
-                )
-                return ObservationResult(
-                    EventDisposition.DUPLICATE,
-                    self._session_from_row(duplicate_session),
-                )
+            duplicate = self._existing_observation(cursor, event)
+            if duplicate:
+                return duplicate
             session, _created = self._claim_session(
                 cursor,
                 canonical_issue_key=event.issue_key,
@@ -591,9 +614,13 @@ class PostgresIssueRepository:
                 context=context,
                 now=now,
             )
+            duplicate = self._existing_observation(cursor, event)
+            if duplicate:
+                return duplicate
             cursor.execute(
                 """
-                SELECT last_github_version, last_github_tiebreaker
+                SELECT state, state_revision, last_github_version,
+                       last_github_tiebreaker
                 FROM issue_sessions
                 WHERE session_id = %s
                 """,
@@ -636,6 +663,13 @@ class PostgresIssueRepository:
             if not applied:
                 return ObservationResult(EventDisposition.STALE, session)
 
+            projected_context_version = _durable_context_version(
+                state=IssueState(version_row["state"]),
+                state_revision=version_row["state_revision"],
+                github_version=event.github_version,
+                github_tiebreaker=tiebreaker,
+                lease_epoch=context.lease_epoch,
+            )
             cursor.execute(
                 """
                 UPDATE issue_sessions
@@ -643,6 +677,7 @@ class PostgresIssueRepository:
                     last_github_tiebreaker = %s,
                     risk_tier = %s,
                     lease_epoch = %s,
+                    context_version = %s,
                     updated_at = %s
                 WHERE session_id = %s
                 RETURNING *
@@ -652,6 +687,7 @@ class PostgresIssueRepository:
                     tiebreaker,
                     risk_tier.value,
                     context.lease_epoch,
+                    projected_context_version,
                     now,
                     session.session_id,
                 ),
@@ -692,12 +728,21 @@ class PostgresIssueRepository:
                 expected_context_version=expected_context_version,
                 lease_epoch=context.lease_epoch,
             )
+            state_revision = row["state_revision"] + 1
+            transitioned_context_version = _durable_context_version(
+                state=updated.state,
+                state_revision=state_revision,
+                github_version=row["last_github_version"],
+                github_tiebreaker=row["last_github_tiebreaker"],
+                lease_epoch=context.lease_epoch,
+            )
             ended_at = now if target is IssueState.CLOSED else None
             cursor.execute(
                 """
                 UPDATE issue_sessions
                 SET state = %s,
                     context_version = %s,
+                    state_revision = %s,
                     updated_at = %s,
                     ended_at = %s
                 WHERE session_id = %s
@@ -705,7 +750,8 @@ class PostgresIssueRepository:
                 """,
                 (
                     updated.state.value,
-                    updated.context_version,
+                    transitioned_context_version,
+                    state_revision,
                     now,
                     ended_at,
                     updated.session_id,
@@ -1119,6 +1165,23 @@ class PostgresIssueRepository:
                 (event_id,),
             )
 
+    def age_lease_for_test(self, elapsed: timedelta) -> None:
+        if not self.schema.startswith("issue_control_test_"):
+            raise RepositoryError("refusing to alter a non-test lease")
+        if elapsed < timedelta(0):
+            raise ValueError("lease age must be non-negative")
+        with self._transaction() as (_connection, cursor):
+            cursor.execute(
+                """
+                UPDATE issue_control_leases
+                SET renewed_at = clock_timestamp() - %s
+                WHERE cluster_name = %s
+                """,
+                (elapsed, self.cluster_name),
+            )
+            if cursor.rowcount != 1:
+                raise RepositoryError("cluster is not bootstrapped")
+
     def drop_schema_for_test(self) -> None:
         if not self.schema.startswith("issue_control_test_"):
             raise RepositoryError("refusing to drop a non-test schema")
@@ -1176,6 +1239,28 @@ def _event_tiebreaker(event: IssueEvent) -> str:
         event.event_id,
     ))
     return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
+def _durable_context_version(
+    *,
+    state: IssueState,
+    state_revision: int,
+    github_version: int,
+    github_tiebreaker: str,
+    lease_epoch: int,
+) -> int:
+    identity = "\0".join((
+        state.value,
+        str(state_revision),
+        str(github_version),
+        github_tiebreaker,
+        str(lease_epoch),
+    ))
+    version = int.from_bytes(
+        hashlib.sha256(identity.encode("utf-8")).digest()[:8],
+        "big",
+    ) & ((1 << 63) - 1)
+    return version or 1
 
 
 __all__ = [

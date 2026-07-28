@@ -27,6 +27,7 @@ from issue_control.repository import (
     _event_tiebreaker,
 )
 from issue_control.ingestion import IssueEventIngestor
+from issue_control.state_machine import StaleTransition
 
 
 POSTGRES_DSN = os.getenv("HERMES_ISSUE_CONTROL_TEST_POSTGRES_DSN")
@@ -261,7 +262,7 @@ def test_same_version_events_converge_independently_of_delivery_order(
         issue_key=other_smaller.issue_key,
     )
 
-    repository.observe_event(
+    larger_first = repository.observe_event(
         larger,
         candidate_session_id="session-same-version",
         risk_tier=RiskTier.HIGH,
@@ -275,7 +276,7 @@ def test_same_version_events_converge_independently_of_delivery_order(
         context=context,
         now=now,
     )
-    repository.observe_event(
+    smaller_first = repository.observe_event(
         other_smaller,
         candidate_session_id="session-same-version-other",
         risk_tier=RiskTier.LOW,
@@ -296,10 +297,8 @@ def test_same_version_events_converge_independently_of_delivery_order(
     assert repository.event_count(other_smaller.issue_key) == 2
     assert repository.get_session(smaller.issue_key).risk_tier is RiskTier.HIGH
     assert repository.get_session(other_smaller.issue_key).risk_tier is RiskTier.HIGH
-    assert (
-        repository.get_session(smaller.issue_key).context_version
-        == repository.get_session(other_smaller.issue_key).context_version
-    )
+    assert stale.session.context_version == larger_first.session.context_version
+    assert applied.session.context_version != smaller_first.session.context_version
     assert [
         mutation.kind for mutation in repository.list_session_mutations(smaller.issue_key)
     ] == [
@@ -355,6 +354,36 @@ def test_duplicate_and_reordered_webhooks_converge_through_real_repository(
     assert repository.count_active_sessions(first.session.issue_key) == 1
     assert repository.event_count(first.session.issue_key) == 2
     assert repository.get_session(first.session.issue_key).state is IssueState.TRIAGED
+
+
+def test_concurrent_duplicate_events_converge_to_one_fact(
+    repository: PostgresIssueRepository,
+    now: datetime,
+) -> None:
+    context = _leader(repository, now)
+    event = _event(
+        event_id="delivery-concurrent-duplicate",
+        github_version=21,
+        occurred_at=now,
+    )
+
+    def observe(_attempt: int):
+        return repository.observe_event(
+            event,
+            candidate_session_id="session-concurrent-duplicate",
+            risk_tier=RiskTier.HIGH,
+            context=context,
+            now=now,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(observe, range(2)))
+
+    assert {result.disposition for result in results} == {
+        EventDisposition.APPLIED,
+        EventDisposition.DUPLICATE,
+    }
+    assert repository.event_count(event.issue_key) == 1
 
 
 def test_reconciliation_replay_converges_through_real_repository(
@@ -533,11 +562,12 @@ def test_s3_to_s5_failover_fences_old_leader_and_preserves_session(
 
     too_early = repository.try_acquire_leadership(
         node_id="s5",
-        now=now + timedelta(seconds=59),
+        now=now + timedelta(days=365),
     )
+    repository.age_lease_for_test(timedelta(seconds=60))
     takeover = repository.try_acquire_leadership(
         node_id="s5",
-        now=now + timedelta(seconds=60),
+        now=now - timedelta(days=365),
     )
 
     assert not too_early.is_leader
@@ -612,10 +642,11 @@ def test_expired_leader_cannot_renew_itself_after_takeover_window(
     now: datetime,
 ) -> None:
     s3 = _leader(repository, now)
+    repository.age_lease_for_test(timedelta(seconds=60))
 
     expired_renewal = repository.try_acquire_leadership(
         node_id="s3",
-        now=now + timedelta(seconds=60),
+        now=now - timedelta(days=365),
     )
 
     assert not expired_renewal.is_leader
@@ -625,21 +656,56 @@ def test_expired_leader_cannot_renew_itself_after_takeover_window(
 def test_fence_freshness_uses_postgresql_clock_not_caller_timestamp(
     repository: PostgresIssueRepository,
 ) -> None:
-    database_now = datetime.now(UTC)
-    stale_time = database_now - timedelta(seconds=61)
-    context = _leader(repository, stale_time)
+    caller_time = datetime.now(UTC) + timedelta(days=365)
+    context = _leader(repository, caller_time)
+    repository.age_lease_for_test(timedelta(seconds=61))
 
     with pytest.raises(StaleFenceError):
         repository.observe_event(
             _event(
                 event_id="delivery-stale-caller-clock",
                 github_version=1,
-                occurred_at=stale_time,
+                occurred_at=caller_time,
             ),
             candidate_session_id="session-stale-caller-clock",
             risk_tier=RiskTier.LOW,
             context=context,
-            now=stale_time,
+            now=caller_time,
+        )
+
+
+def test_new_event_projection_invalidates_stale_transition_context(
+    repository: PostgresIssueRepository,
+    now: datetime,
+) -> None:
+    context = _leader(repository, now)
+    initial = repository.observe_event(
+        _event(event_id="delivery-context-v1", github_version=1, occurred_at=now),
+        candidate_session_id="session-context-cas",
+        risk_tier=RiskTier.LOW,
+        context=context,
+        now=now,
+    ).session
+    projected = repository.observe_event(
+        _event(
+            event_id="delivery-context-v2",
+            github_version=2,
+            occurred_at=now + timedelta(seconds=1),
+        ),
+        candidate_session_id="session-context-cas",
+        risk_tier=RiskTier.HIGH,
+        context=context,
+        now=now,
+    ).session
+
+    assert projected.context_version != initial.context_version
+    with pytest.raises(StaleTransition):
+        repository.transition_session(
+            issue_key=initial.issue_key,
+            target=IssueState.TRIAGED,
+            expected_context_version=initial.context_version,
+            context=context,
+            now=now,
         )
 
 

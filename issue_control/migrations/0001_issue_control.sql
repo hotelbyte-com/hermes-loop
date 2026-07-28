@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS issue_sessions (
         )
     ),
     context_version BIGINT NOT NULL CHECK (context_version >= 1),
+    state_revision BIGINT NOT NULL DEFAULT 0 CHECK (state_revision >= 0),
     task_graph_ref TEXT,
     active_run_id TEXT,
     risk_tier TEXT NOT NULL CHECK (risk_tier IN ('unknown', 'low', 'medium', 'high')),
