@@ -6,6 +6,7 @@ import pytest
 from issue_control.config import ConfigError, IssueControlConfig
 from issue_control.github import GitHubPermissionError, GitHubReadOnlyClient
 from issue_control.payloads import PayloadSanitizer, S3SanitizedPayloadStore
+from issue_control.secrets import EnvironmentSecretResolver, SecretResolutionError
 
 
 def _valid_config() -> dict:
@@ -86,6 +87,7 @@ def test_phase_1a_failover_cadence_is_fixed(
         ("redis_url", "unix:///run/redis.sock"),
         ("redis_url", "secret://vault/redis"),
         ("redis_url", "secret://env/"),
+        ("redis_url", "secret://env/_"),
     ],
 )
 def test_service_locations_reject_credentials_and_unsupported_dsns(
@@ -132,8 +134,10 @@ def test_endpoint_urls_reject_userinfo_and_query_credentials(
     ("field", "value"),
     [
         ("read_token_secret_ref", "secret://env/"),
+        ("read_token_secret_ref", "secret://env/_"),
         ("read_token_secret_ref", "secret://env/TOKEN/extra"),
         ("webhook_secret_ref", "secret://env/"),
+        ("webhook_secret_ref", "secret://env/_"),
         ("webhook_secret_ref", "secret://env/TOKEN/extra"),
     ],
 )
@@ -146,6 +150,36 @@ def test_github_secret_references_require_exact_environment_reference(
 
     with pytest.raises(ConfigError, match="secret://env/NAME"):
         IssueControlConfig.from_mapping(raw)
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        "secret://env/",
+        "secret://env/_",
+        "secret://env/TOKEN/extra",
+        "secret://vault/TOKEN",
+    ],
+)
+def test_runtime_resolver_uses_same_exact_reference_predicate(
+    reference: str,
+) -> None:
+    with pytest.raises(SecretResolutionError):
+        EnvironmentSecretResolver().resolve(reference)
+
+
+def test_environment_reference_with_alphanumeric_name_is_shared_and_valid(
+    monkeypatch,
+) -> None:
+    raw = _valid_config()
+    raw["github"]["read_token_secret_ref"] = "secret://env/_TOKEN_"
+    config = IssueControlConfig.from_mapping(raw)
+    monkeypatch.setenv("_TOKEN_", "resolved")
+
+    assert (
+        EnvironmentSecretResolver().resolve(config.github.read_token_secret_ref)
+        == "resolved"
+    )
 
 
 @pytest.mark.parametrize(

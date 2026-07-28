@@ -3,18 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import re
 from typing import Any, Mapping
 from urllib.parse import parse_qsl, urlsplit
 
 from issue_control.contracts import issue_key
+from issue_control.secrets import SecretResolutionError, environment_secret_name
 
 
 class ConfigError(ValueError):
     """Configuration is unsafe, ambiguous, or unsupported in Phase 1A."""
 
 
-_SECRET_REFERENCE_RE = re.compile(r"^secret://env/[A-Za-z0-9_]+$")
 _CREDENTIAL_QUERY_FRAGMENTS = (
     "password",
     "secret",
@@ -40,8 +39,10 @@ def _strict_keys(
 
 
 def _validate_secret_reference(field: str, value: str) -> None:
-    if not _SECRET_REFERENCE_RE.fullmatch(value):
-        raise ConfigError(f"{field} must use secret://env/NAME")
+    try:
+        environment_secret_name(value)
+    except SecretResolutionError as exc:
+        raise ConfigError(f"{field} must use secret://env/NAME") from exc
 
 
 def _validate_credential_free_url(
