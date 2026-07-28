@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 from fastapi.routing import APIRoute
 
 from issue_control.status import InternalStatusService, create_status_app
+from issue_control.web import create_control_plane_app
 
 
 NOW = datetime(2026, 7, 28, 12, 0, tzinfo=UTC)
@@ -57,6 +58,20 @@ class _Repository:
                 },
             ],
         }
+
+    def issue_session_trace(self, *, issue_key=None, run_id=None, limit=100):
+        assert issue_key in (None, "hotelbyte-com/hotel-be#22338")
+        assert run_id in (None, "reconcile-42")
+        assert limit in (100, 5)
+        return [
+            {
+                "issue_key": "hotelbyte-com/hotel-be#22338",
+                "session_id": "session-1",
+                "run_id": "reconcile-42",
+                "lease_epoch": 12,
+                "kind": "event_observed",
+            }
+        ]
 
 
 class _GitHub:
@@ -129,6 +144,7 @@ def test_internal_status_app_is_read_only_and_returns_distinct_health_and_ready(
     assert ready.json()["ready"] is True
     assert status.json()["leader"]["lease_epoch"] == 12
     assert len(reconciliation.json()["repositories"]) == 2
+    assert reconciliation.json()["issue_sessions"][0]["session_id"] == "session-1"
     public_methods = {
         method
         for route in app.routes
@@ -136,3 +152,38 @@ def test_internal_status_app_is_read_only_and_returns_distinct_health_and_ready(
         for method in (route.methods or set())
     }
     assert public_methods <= {"GET", "HEAD"}
+
+
+class _Runtime:
+    def start(self):
+        pass
+
+    def stop(self):
+        pass
+
+    def ingest_webhook(self, *, headers, body):
+        return {"size": len(body)}
+
+
+def test_production_app_reuses_status_routes_and_bounds_webhook_body() -> None:
+    app = create_control_plane_app(
+        status_service=_service(),
+        runtime=_Runtime(),
+    )
+    with TestClient(app) as client:
+        reconciliation = client.get(
+            "/internal/reconciliation",
+            params={
+                "issue_key": "hotelbyte-com/hotel-be#22338",
+                "run_id": "reconcile-42",
+                "limit": 5,
+            },
+        )
+        oversized = client.post(
+            "/github/events",
+            content=b"x" * (1_048_576 + 1),
+        )
+
+    assert reconciliation.status_code == 200
+    assert reconciliation.json()["issue_sessions"][0]["run_id"] == "reconcile-42"
+    assert oversized.status_code == 413

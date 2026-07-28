@@ -62,7 +62,11 @@ def _leader(
     )
     decision = repository.try_acquire_leadership(node_id=node_id, now=now)
     assert decision.is_leader
-    return MutationContext(node_id=node_id, lease_epoch=decision.lease_epoch)
+    return MutationContext(
+        node_id=node_id,
+        lease_epoch=decision.lease_epoch,
+        run_id=f"test-{node_id}",
+    )
 
 
 def _event(
@@ -292,6 +296,16 @@ def test_same_version_events_converge_independently_of_delivery_order(
     assert repository.event_count(other_smaller.issue_key) == 2
     assert repository.get_session(smaller.issue_key).risk_tier is RiskTier.HIGH
     assert repository.get_session(other_smaller.issue_key).risk_tier is RiskTier.HIGH
+    assert (
+        repository.get_session(smaller.issue_key).context_version
+        == repository.get_session(other_smaller.issue_key).context_version
+    )
+    assert [
+        mutation.kind for mutation in repository.list_session_mutations(smaller.issue_key)
+    ] == [
+        mutation.kind
+        for mutation in repository.list_session_mutations(other_smaller.issue_key)
+    ]
 
 
 def test_duplicate_and_reordered_webhooks_converge_through_real_repository(
@@ -408,6 +422,55 @@ def test_repository_restart_recovers_postgresql_truth_when_process_state_is_lost
     assert restarted.event_count(observed.session.issue_key) == 1
 
 
+def test_closed_issue_reopens_with_a_new_lifecycle_session(
+    repository: PostgresIssueRepository,
+    now: datetime,
+) -> None:
+    context = _leader(repository, now)
+    first = repository.observe_event(
+        _event(event_id="delivery-first-lifecycle", github_version=1, occurred_at=now),
+        candidate_session_id="stable-issue-session",
+        risk_tier=RiskTier.LOW,
+        context=context,
+        now=now,
+    ).session
+    transition_path = (
+        IssueState.TRIAGED,
+        IssueState.PLANNED,
+        IssueState.EXECUTING,
+        IssueState.REVIEWING,
+        IssueState.PR_OPEN,
+        IssueState.CHECKS_GREEN,
+        IssueState.MERGED,
+        IssueState.VERIFIED,
+        IssueState.CLOSED,
+    )
+    for target in transition_path:
+        first = repository.transition_session(
+            issue_key=first.issue_key,
+            target=target,
+            expected_context_version=first.context_version,
+            context=context,
+            now=now,
+        )
+
+    reopened = repository.observe_event(
+        _event(
+            event_id="delivery-second-lifecycle",
+            github_version=2,
+            occurred_at=now + timedelta(minutes=1),
+        ),
+        candidate_session_id="stable-issue-session",
+        risk_tier=RiskTier.MEDIUM,
+        context=context,
+        now=now,
+    ).session
+
+    assert reopened.session_id == "stable-issue-session:2"
+    assert reopened.session_id != first.session_id
+    assert repository.count_active_sessions(reopened.issue_key) == 1
+
+
 def test_redis_loss_and_restart_leave_postgresql_event_and_session_truth_intact(
     repository: PostgresIssueRepository,
     now: datetime,
@@ -490,7 +553,11 @@ def test_s3_to_s5_failover_fences_old_leader_and_preserves_session(
             now=now + timedelta(seconds=60),
         )
 
-    s5 = MutationContext(node_id="s5", lease_epoch=takeover.lease_epoch)
+    s5 = MutationContext(
+        node_id="s5",
+        lease_epoch=takeover.lease_epoch,
+        run_id="test-s5",
+    )
     adopted, created = repository.claim_session(
         issue_key=session.issue_key,
         candidate_session_id="must-not-replace-active-session",
@@ -555,6 +622,27 @@ def test_expired_leader_cannot_renew_itself_after_takeover_window(
     assert expired_renewal.lease_epoch == s3.lease_epoch
 
 
+def test_fence_freshness_uses_postgresql_clock_not_caller_timestamp(
+    repository: PostgresIssueRepository,
+) -> None:
+    database_now = datetime.now(UTC)
+    stale_time = database_now - timedelta(seconds=61)
+    context = _leader(repository, stale_time)
+
+    with pytest.raises(StaleFenceError):
+        repository.observe_event(
+            _event(
+                event_id="delivery-stale-caller-clock",
+                github_version=1,
+                occurred_at=stale_time,
+            ),
+            candidate_session_id="session-stale-caller-clock",
+            risk_tier=RiskTier.LOW,
+            context=context,
+            now=stale_time,
+        )
+
+
 def test_every_session_mutation_is_traceable_by_session_run_and_epoch(
     repository: PostgresIssueRepository,
     now: datetime,
@@ -575,10 +663,19 @@ def test_every_session_mutation_is_traceable_by_session_run_and_epoch(
 
     mutations = repository.list_session_mutations(observed.session.issue_key)
 
-    assert [mutation.kind for mutation in mutations] == ["claimed", "event_applied"]
+    assert [mutation.kind for mutation in mutations] == ["claimed"]
     assert all(mutation.session_id == "session-trace" for mutation in mutations)
     assert all(mutation.run_id == "run-42" for mutation in mutations)
     assert all(mutation.lease_epoch == leader.lease_epoch for mutation in mutations)
+    trace = repository.issue_session_trace(run_id="run-42", limit=10)
+    assert {item["issue_key"] for item in trace} == {observed.session.issue_key}
+    assert {item["session_id"] for item in trace} == {"session-trace"}
+    assert {item["lease_epoch"] for item in trace} == {leader.lease_epoch}
+
+
+def test_mutation_context_requires_nonblank_run_trace() -> None:
+    with pytest.raises(ValueError, match="run_id"):
+        MutationContext(node_id="s3", lease_epoch=1, run_id="")
 
 
 def test_reconciliation_status_measures_lag_and_classification_coverage(

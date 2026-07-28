@@ -64,6 +64,17 @@ def test_issue_event_public_contract_has_only_the_approved_fields() -> None:
 
     assert event.actor_kind is ActorKind.HUMAN
 
+    with pytest.raises(ValueError, match="s3://"):
+        IssueEvent(
+            event_id="delivery-local",
+            issue_key="hotelbyte-com/hotel-be#22338",
+            github_version=43,
+            event_type="issues.opened",
+            actor_kind=ActorKind.HUMAN,
+            occurred_at=datetime(2026, 7, 28, tzinfo=UTC),
+            sanitized_payload_ref="file:///tmp/payload.json",
+        )
+
 
 def test_issue_session_public_contract_has_only_the_approved_fields() -> None:
     assert [field.name for field in fields(IssueSession)] == [

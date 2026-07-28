@@ -6,11 +6,11 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict, is_dataclass
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request, Response, status as http_status
+from fastapi import FastAPI, HTTPException, Request, status as http_status
 
-from issue_control.ingestion import GitHubWebhookError
+from issue_control.ingestion import GitHubWebhookError, MAX_WEBHOOK_BYTES
 from issue_control.runtime import IssueControlRuntime, NotLeaderError
-from issue_control.status import InternalStatusService
+from issue_control.status import InternalStatusService, create_status_router
 
 
 def create_control_plane_app(
@@ -34,32 +34,36 @@ def create_control_plane_app(
         lifespan=lifespan,
     )
 
-    @app.get("/internal/health")
-    def health() -> dict[str, Any]:
-        return status_service.health()
-
-    @app.get("/internal/ready")
-    def ready(response: Response) -> dict[str, Any]:
-        readiness = status_service.readiness()
-        if not readiness["ready"]:
-            response.status_code = http_status.HTTP_503_SERVICE_UNAVAILABLE
-        return readiness
-
-    @app.get("/internal/status")
-    def status() -> dict[str, Any]:
-        return status_service.status()
-
-    @app.get("/internal/reconciliation")
-    def reconciliation() -> dict[str, Any]:
-        return status_service.reconciliation()
+    app.include_router(create_status_router(status_service))
 
     @app.post("/github/events", status_code=http_status.HTTP_202_ACCEPTED)
     async def github_events(request: Request) -> dict[str, Any]:
-        body = await request.body()
+        content_length = request.headers.get("content-length")
+        if content_length is not None:
+            try:
+                declared_length = int(content_length)
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=http_status.HTTP_400_BAD_REQUEST,
+                    detail="invalid Content-Length",
+                ) from exc
+            if declared_length > MAX_WEBHOOK_BYTES:
+                raise HTTPException(
+                    status_code=http_status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    detail="webhook body exceeds the one-megabyte limit",
+                )
+        body = bytearray()
+        async for chunk in request.stream():
+            if len(body) + len(chunk) > MAX_WEBHOOK_BYTES:
+                raise HTTPException(
+                    status_code=http_status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    detail="webhook body exceeds the one-megabyte limit",
+                )
+            body.extend(chunk)
         try:
             result = runtime.ingest_webhook(
                 headers=dict(request.headers),
-                body=body,
+                body=bytes(body),
             )
         except GitHubWebhookError as exc:
             raise HTTPException(

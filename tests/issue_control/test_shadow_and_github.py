@@ -57,6 +57,25 @@ def test_phase_1a_topology_cannot_reverse_s3_primary_and_s5_standby() -> None:
 
 
 @pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("renewal_interval_seconds", 30, "renewal_interval_seconds=10"),
+        ("takeover_after_seconds", 31, "takeover_after_seconds=60"),
+    ],
+)
+def test_phase_1a_failover_cadence_is_fixed(
+    field: str,
+    value: int,
+    message: str,
+) -> None:
+    raw = _valid_config()
+    raw[field] = value
+
+    with pytest.raises(ConfigError, match=message):
+        IssueControlConfig.from_mapping(raw)
+
+
+@pytest.mark.parametrize(
     ("path", "value"),
     [
         (("github", "token"), "ghp_write"),

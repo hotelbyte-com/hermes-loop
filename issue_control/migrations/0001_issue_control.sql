@@ -75,11 +75,11 @@ CREATE TABLE IF NOT EXISTS issue_events (
     occurred_at TIMESTAMPTZ NOT NULL,
     sanitized_payload_ref TEXT NOT NULL CHECK (
         length(sanitized_payload_ref) BETWEEN 1 AND 2048
+        AND sanitized_payload_ref ~ '^s3://[^/[:space:]]+/.+$'
     ),
     session_id TEXT NOT NULL REFERENCES issue_sessions(session_id),
-    run_id TEXT,
+    run_id TEXT NOT NULL CHECK (length(btrim(run_id)) > 0),
     lease_epoch BIGINT NOT NULL CHECK (lease_epoch >= 1),
-    projection_applied BOOLEAN NOT NULL,
     recorded_at TIMESTAMPTZ NOT NULL
 );
 
@@ -97,7 +97,7 @@ CREATE TABLE IF NOT EXISTS issue_session_snapshots (
     risk_tier TEXT NOT NULL,
     mutation_kind TEXT NOT NULL,
     event_id TEXT,
-    run_id TEXT,
+    run_id TEXT NOT NULL CHECK (length(btrim(run_id)) > 0),
     lease_epoch BIGINT NOT NULL CHECK (lease_epoch >= 1),
     recorded_at TIMESTAMPTZ NOT NULL,
     UNIQUE (session_id, context_version)

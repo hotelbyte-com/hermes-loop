@@ -15,5 +15,5 @@ def test_issue_control_code_and_migrations_ship_in_wheel_and_sdist() -> None:
 
     assert "issue_control" in include
     assert "issue_control.*" in include
-    assert package_data["issue_control"] == ["migrations/*.sql"]
+    assert "migrations/*.sql" in package_data["issue_control"]
     assert "recursive-include issue_control/migrations *.sql" in manifest

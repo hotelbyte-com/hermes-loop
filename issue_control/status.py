@@ -6,7 +6,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
-from fastapi import FastAPI, Response, status as http_status
+from fastapi import APIRouter, FastAPI, Query, Response, status as http_status
 
 
 class StatusRepository(Protocol):
@@ -18,6 +18,14 @@ class StatusRepository(Protocol):
         now: datetime,
         authorized_repositories: tuple[str, ...],
     ) -> dict[str, Any]: ...
+
+    def issue_session_trace(
+        self,
+        *,
+        issue_key: str | None = None,
+        run_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]: ...
 
 
 class GitHubPermissionStatus(Protocol):
@@ -108,7 +116,13 @@ class InternalStatusService:
             },
         }
 
-    def reconciliation(self) -> dict[str, Any]:
+    def reconciliation(
+        self,
+        *,
+        issue_key: str | None = None,
+        run_id: str | None = None,
+        limit: int = 100,
+    ) -> dict[str, Any]:
         status = self.status()
         return {
             "all_authorized_open_issues_classified": status[
@@ -116,7 +130,45 @@ class InternalStatusService:
             ],
             "maximum_lag_seconds": status["maximum_reconciliation_lag_seconds"],
             "repositories": status["reconciliation"],
+            "issue_sessions": self._repository.issue_session_trace(
+                issue_key=issue_key,
+                run_id=run_id,
+                limit=limit,
+            ),
         }
+
+
+def create_status_router(service: InternalStatusService) -> APIRouter:
+    router = APIRouter()
+
+    @router.get("/internal/health")
+    def health() -> dict[str, Any]:
+        return service.health()
+
+    @router.get("/internal/ready")
+    def ready(response: Response) -> dict[str, Any]:
+        readiness = service.readiness()
+        if not readiness["ready"]:
+            response.status_code = http_status.HTTP_503_SERVICE_UNAVAILABLE
+        return readiness
+
+    @router.get("/internal/status")
+    def control_status() -> dict[str, Any]:
+        return service.status()
+
+    @router.get("/internal/reconciliation")
+    def reconciliation(
+        issue_key: str | None = None,
+        run_id: str | None = None,
+        limit: int = Query(default=100, ge=1, le=500),
+    ) -> dict[str, Any]:
+        return service.reconciliation(
+            issue_key=issue_key,
+            run_id=run_id,
+            limit=limit,
+        )
+
+    return router
 
 
 def create_status_app(service: InternalStatusService) -> FastAPI:
@@ -126,25 +178,7 @@ def create_status_app(service: InternalStatusService) -> FastAPI:
         redoc_url=None,
         openapi_url=None,
     )
-
-    @app.get("/internal/health")
-    def health() -> dict[str, Any]:
-        return service.health()
-
-    @app.get("/internal/ready")
-    def ready(response: Response) -> dict[str, Any]:
-        readiness = service.readiness()
-        if not readiness["ready"]:
-            response.status_code = http_status.HTTP_503_SERVICE_UNAVAILABLE
-        return readiness
-
-    @app.get("/internal/status")
-    def control_status() -> dict[str, Any]:
-        return service.status()
-
-    @app.get("/internal/reconciliation")
-    def reconciliation() -> dict[str, Any]:
-        return service.reconciliation()
+    app.include_router(create_status_router(service))
 
     return app
 
@@ -152,4 +186,5 @@ def create_status_app(service: InternalStatusService) -> FastAPI:
 __all__ = [
     "InternalStatusService",
     "create_status_app",
+    "create_status_router",
 ]

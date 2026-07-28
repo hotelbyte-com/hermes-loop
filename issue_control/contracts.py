@@ -9,6 +9,7 @@ import re
 
 
 _REPOSITORY_RE = re.compile(r"^[a-z0-9_.-]+/[a-z0-9_.-]+$")
+_S3_REFERENCE_RE = re.compile(r"^s3://[^/\s]+/.+$")
 
 
 class ActorKind(StrEnum):
@@ -100,9 +101,9 @@ class IssueEvent:
             raise ValueError("occurred_at must be timezone-aware")
         if (
             not isinstance(self.sanitized_payload_ref, str)
-            or not self.sanitized_payload_ref.strip()
+            or not _S3_REFERENCE_RE.fullmatch(self.sanitized_payload_ref)
         ):
-            raise ValueError("sanitized_payload_ref is required")
+            raise ValueError("sanitized_payload_ref must use s3://")
         if len(self.sanitized_payload_ref) > 2048:
             raise ValueError("sanitized_payload_ref exceeds 2048 characters")
 

@@ -208,7 +208,11 @@ def test_invalid_webhook_contracts_fail_before_persistence(
         ingestor.ingest_webhook(
             headers=headers,
             body=body,
-            context=MutationContext(node_id="s3", lease_epoch=7),
+            context=MutationContext(
+                node_id="s3",
+                lease_epoch=7,
+                run_id="invalid-webhook",
+            ),
             now=NOW,
         )
 
@@ -233,7 +237,11 @@ def test_malformed_signed_github_shape_fails_closed_before_persistence() -> None
         ingestor.ingest_webhook(
             headers=_headers(body),
             body=body,
-            context=MutationContext(node_id="s3", lease_epoch=7),
+            context=MutationContext(
+                node_id="s3",
+                lease_epoch=7,
+                run_id="malformed-webhook",
+            ),
             now=NOW,
         )
 
@@ -255,7 +263,11 @@ def test_unauthorized_repository_fails_closed() -> None:
         ingestor.ingest_webhook(
             headers=_headers(body),
             body=body,
-            context=MutationContext(node_id="s3", lease_epoch=7),
+            context=MutationContext(
+                node_id="s3",
+                lease_epoch=7,
+                run_id="oversized-webhook",
+            ),
             now=NOW,
         )
 
@@ -337,7 +349,11 @@ def test_reconciliation_event_identity_is_deterministic_across_replay() -> None:
         authorized_repositories=("hotelbyte-com/hotel-be",),
     )
     issue = _GitHub().list_open_issues("hotelbyte-com/hotel-be")[0]
-    context = MutationContext(node_id="s3", lease_epoch=9)
+    context = MutationContext(
+        node_id="s3",
+        lease_epoch=9,
+        run_id="reconciliation-replay",
+    )
 
     ingestor.ingest_reconciliation_issue(
         repository="hotelbyte-com/hotel-be",

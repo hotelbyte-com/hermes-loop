@@ -54,7 +54,11 @@ class EventDisposition(StrEnum):
 class MutationContext:
     node_id: str
     lease_epoch: int
-    run_id: str | None = None
+    run_id: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.run_id, str) or not self.run_id.strip():
+            raise ValueError("run_id is required")
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,7 +82,7 @@ class SessionMutation:
     kind: str
     issue_key: str
     session_id: str
-    run_id: str | None
+    run_id: str
     lease_epoch: int
     context_version: int
     recorded_at: datetime
@@ -105,10 +109,10 @@ class PostgresIssueRepository:
             raise ValueError("PostgreSQL DSN is required")
         if not _SCHEMA_RE.fullmatch(schema):
             raise ValueError("schema must be a simple PostgreSQL identifier")
-        if renewal_interval <= timedelta(0):
-            raise ValueError("renewal_interval must be positive")
-        if takeover_after <= renewal_interval:
-            raise ValueError("takeover_after must exceed renewal_interval")
+        if renewal_interval != DEFAULT_RENEWAL_INTERVAL:
+            raise ValueError("Phase 1A requires a 10-second renewal interval")
+        if takeover_after != DEFAULT_TAKEOVER_AFTER:
+            raise ValueError("Phase 1A requires a 60-second takeover interval")
         self.dsn = dsn
         self.schema = schema
         self.cluster_name = cluster_name
@@ -339,23 +343,23 @@ class PostgresIssueRepository:
         self,
         cursor: Cursor[dict[str, Any]],
         context: MutationContext,
-        now: datetime,
     ) -> None:
         cursor.execute(
             """
-            SELECT leader_node, lease_epoch, renewed_at
+            SELECT leader_node, lease_epoch,
+                   clock_timestamp() - renewed_at < %s AS lease_fresh
             FROM issue_control_leases
             WHERE cluster_name = %s
             FOR SHARE
             """,
-            (self.cluster_name,),
+            (self.takeover_after, self.cluster_name),
         )
         row = cursor.fetchone()
         if (
             not row
             or row["leader_node"] != context.node_id
             or row["lease_epoch"] != context.lease_epoch
-            or now - row["renewed_at"] >= self.takeover_after
+            or not row["lease_fresh"]
         ):
             raise StaleFenceError(
                 f"node {context.node_id!r} epoch {context.lease_epoch} is stale"
@@ -432,6 +436,26 @@ class PostgresIssueRepository:
         if not row:
             cursor.execute(
                 """
+                SELECT count(*) AS lifecycle_count
+                FROM issue_sessions
+                WHERE issue_key = %s
+                """,
+                (canonical_issue_key,),
+            )
+            lifecycle_number = (
+                _required_row(
+                    cursor.fetchone(),
+                    operation="count issue lifecycles",
+                )["lifecycle_count"]
+                + 1
+            )
+            lifecycle_session_id = (
+                candidate_session_id
+                if lifecycle_number == 1
+                else f"{candidate_session_id}:{lifecycle_number}"
+            )
+            cursor.execute(
+                """
                 INSERT INTO issue_sessions(
                     session_id, issue_key, state, context_version,
                     risk_tier, lease_epoch, started_at, updated_at
@@ -441,9 +465,9 @@ class PostgresIssueRepository:
                 RETURNING *
                 """,
                 (
-                    candidate_session_id,
+                    lifecycle_session_id,
                     canonical_issue_key,
-                    risk_tier.value,
+                    RiskTier.UNKNOWN.value,
                     context.lease_epoch,
                     now,
                     now,
@@ -511,7 +535,7 @@ class PostgresIssueRepository:
     ) -> tuple[IssueSession, bool]:
         canonical_issue_key = _canonical_issue_key(issue_key)
         with self._transaction() as (_connection, cursor):
-            self._assert_fence(cursor, context, now)
+            self._assert_fence(cursor, context)
             return self._claim_session(
                 cursor,
                 canonical_issue_key=canonical_issue_key,
@@ -531,7 +555,34 @@ class PostgresIssueRepository:
         now: datetime,
     ) -> ObservationResult:
         with self._transaction() as (_connection, cursor):
-            self._assert_fence(cursor, context, now)
+            self._assert_fence(cursor, context)
+            cursor.execute(
+                """
+                SELECT sessions.*
+                FROM issue_events AS events
+                JOIN issue_sessions AS sessions
+                  ON sessions.session_id = events.session_id
+                WHERE events.event_id = %s
+                """,
+                (event.event_id,),
+            )
+            duplicate_session = cursor.fetchone()
+            if duplicate_session:
+                cursor.execute(
+                    "SELECT * FROM issue_events WHERE event_id = %s",
+                    (event.event_id,),
+                )
+                _assert_same_event(
+                    _required_row(
+                        cursor.fetchone(),
+                        operation="read duplicate event",
+                    ),
+                    event,
+                )
+                return ObservationResult(
+                    EventDisposition.DUPLICATE,
+                    self._session_from_row(duplicate_session),
+                )
             session, _created = self._claim_session(
                 cursor,
                 canonical_issue_key=event.issue_key,
@@ -540,19 +591,6 @@ class PostgresIssueRepository:
                 context=context,
                 now=now,
             )
-            cursor.execute(
-                """
-                SELECT *
-                FROM issue_events
-                WHERE event_id = %s
-                """,
-                (event.event_id,),
-            )
-            existing = cursor.fetchone()
-            if existing:
-                _assert_same_event(existing, event)
-                return ObservationResult(EventDisposition.DUPLICATE, session)
-
             cursor.execute(
                 """
                 SELECT last_github_version, last_github_tiebreaker
@@ -577,10 +615,9 @@ class PostgresIssueRepository:
                 INSERT INTO issue_events(
                     event_id, issue_key, github_version, event_type,
                     actor_kind, occurred_at, sanitized_payload_ref,
-                    session_id, run_id, lease_epoch, projection_applied,
-                    recorded_at
+                    session_id, run_id, lease_epoch, recorded_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     event.event_id,
@@ -593,7 +630,6 @@ class PostgresIssueRepository:
                     session.session_id,
                     context.run_id,
                     context.lease_epoch,
-                    applied,
                     now,
                 ),
             )
@@ -607,7 +643,6 @@ class PostgresIssueRepository:
                     last_github_tiebreaker = %s,
                     risk_tier = %s,
                     lease_epoch = %s,
-                    context_version = context_version + 1,
                     updated_at = %s
                 WHERE session_id = %s
                 RETURNING *
@@ -624,14 +659,6 @@ class PostgresIssueRepository:
             session = self._session_from_row(
                 _required_row(cursor.fetchone(), operation="project event")
             )
-            self._append_snapshot(
-                cursor,
-                session=session,
-                kind="event_applied",
-                context=context,
-                now=now,
-                event_id=event.event_id,
-            )
             return ObservationResult(EventDisposition.APPLIED, session)
 
     def transition_session(
@@ -645,7 +672,7 @@ class PostgresIssueRepository:
     ) -> IssueSession:
         canonical_issue_key = _canonical_issue_key(issue_key)
         with self._transaction() as (_connection, cursor):
-            self._assert_fence(cursor, context, now)
+            self._assert_fence(cursor, context)
             cursor.execute(
                 """
                 SELECT *
@@ -782,6 +809,53 @@ class PostgresIssueRepository:
                 for row in cursor.fetchall()
             ]
 
+    def issue_session_trace(
+        self,
+        *,
+        issue_key: str | None = None,
+        run_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        if issue_key is not None:
+            issue_key = _canonical_issue_key(issue_key)
+        if run_id is not None and not run_id.strip():
+            raise ValueError("run_id filter must be nonblank")
+        if not 1 <= limit <= 500:
+            raise ValueError("trace limit must be between 1 and 500")
+        with self._transaction() as (_connection, cursor):
+            cursor.execute(
+                """
+                SELECT issue_key, session_id, run_id, lease_epoch,
+                       mutation_kind AS kind, recorded_at
+                FROM (
+                    SELECT issue_key, session_id, run_id, lease_epoch,
+                           mutation_kind, recorded_at, snapshot_sequence AS sequence
+                    FROM issue_session_snapshots
+                    UNION ALL
+                    SELECT issue_key, session_id, run_id, lease_epoch,
+                           'event_observed' AS mutation_kind,
+                           recorded_at, ledger_sequence AS sequence
+                    FROM issue_events
+                ) AS trace
+                WHERE (%s IS NULL OR issue_key = %s)
+                  AND (%s IS NULL OR run_id = %s)
+                ORDER BY recorded_at DESC, sequence DESC
+                LIMIT %s
+                """,
+                (issue_key, issue_key, run_id, run_id, limit),
+            )
+            return [
+                {
+                    "issue_key": row["issue_key"],
+                    "session_id": row["session_id"],
+                    "run_id": row["run_id"],
+                    "lease_epoch": row["lease_epoch"],
+                    "kind": row["kind"],
+                    "recorded_at": row["recorded_at"].isoformat(),
+                }
+                for row in cursor.fetchall()
+            ]
+
     def record_reconciliation_started(
         self,
         repository: str,
@@ -790,7 +864,7 @@ class PostgresIssueRepository:
         now: datetime,
     ) -> None:
         with self._transaction() as (_connection, cursor):
-            self._assert_fence(cursor, context, now)
+            self._assert_fence(cursor, context)
             cursor.execute(
                 """
                 INSERT INTO issue_reconciliation_status(
@@ -822,7 +896,7 @@ class PostgresIssueRepository:
         now: datetime,
     ) -> None:
         with self._transaction() as (_connection, cursor):
-            self._assert_fence(cursor, context, now)
+            self._assert_fence(cursor, context)
             cursor.execute(
                 """
                 UPDATE issue_reconciliation_status
@@ -858,7 +932,7 @@ class PostgresIssueRepository:
         now: datetime,
     ) -> None:
         with self._transaction() as (_connection, cursor):
-            self._assert_fence(cursor, context, now)
+            self._assert_fence(cursor, context)
             cursor.execute(
                 """
                 UPDATE issue_reconciliation_status

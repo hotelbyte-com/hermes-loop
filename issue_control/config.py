@@ -173,10 +173,10 @@ class IssueControlConfig:
             raise ConfigError("Phase 1A requires primary_node=s3 and standby_node=s5")
         if config.node_id not in (config.primary_node, config.standby_node):
             raise ConfigError("node_id must be the configured primary or standby")
-        if config.renewal_interval_seconds <= 0:
-            raise ConfigError("renewal_interval_seconds must be positive")
-        if config.takeover_after_seconds <= config.renewal_interval_seconds:
-            raise ConfigError("takeover_after_seconds must exceed renewal cadence")
+        if config.renewal_interval_seconds != 10:
+            raise ConfigError("Phase 1A requires renewal_interval_seconds=10")
+        if config.takeover_after_seconds != 60:
+            raise ConfigError("Phase 1A requires takeover_after_seconds=60")
         if config.reconciliation_interval_seconds <= 0:
             raise ConfigError("reconciliation_interval_seconds must be positive")
         if not repositories or len(set(repositories)) != len(repositories):
