@@ -73,10 +73,12 @@ class _Repository:
         self,
         *,
         issue_key,
+        expected_session_id,
         context,
         now,
     ):
         current = self.sessions[issue_key]
+        assert current.session_id == expected_session_id
         if current.state is IssueState.TRIAGED:
             return current
         if current.state is not IssueState.DISCOVERED:

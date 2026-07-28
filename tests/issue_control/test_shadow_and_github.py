@@ -4,7 +4,6 @@ import httpx
 import pytest
 
 from issue_control.config import ConfigError, IssueControlConfig
-from issue_control.cli import build_application
 from issue_control.github import GitHubPermissionError, GitHubReadOnlyClient
 from issue_control.payloads import PayloadSanitizer, S3SanitizedPayloadStore
 
@@ -156,88 +155,6 @@ def test_github_client_has_only_get_paths_and_filters_pull_requests() -> None:
     assert not hasattr(client, "post")
     assert not hasattr(client, "patch")
     assert not hasattr(client, "delete")
-
-
-@pytest.mark.parametrize(
-    ("failure_stage", "expected_cleanup"),
-    [
-        ("permission", ["github", "redis"]),
-        ("s3", ["github", "redis"]),
-        ("webhook_secret", ["s3", "github", "redis"]),
-    ],
-)
-def test_application_startup_failure_closes_constructed_clients(
-    monkeypatch,
-    failure_stage: str,
-    expected_cleanup: list[str],
-) -> None:
-    cleanup: list[str] = []
-
-    class Repository:
-        cluster_name = "issue-control-test"
-
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def migrate(self):
-            pass
-
-        def bootstrap_cluster(self, **kwargs):
-            pass
-
-    class RedisClient:
-        def close(self):
-            cleanup.append("redis")
-
-    class RedisFactory:
-        @staticmethod
-        def from_url(*args, **kwargs):
-            return RedisClient()
-
-    class GitHub:
-        def __init__(self, **kwargs):
-            pass
-
-        def assert_read_only_permissions(self):
-            if failure_stage == "permission":
-                raise GitHubPermissionError("unsafe permission")
-
-        def close(self):
-            cleanup.append("github")
-
-    class S3:
-        def close(self):
-            cleanup.append("s3")
-
-    class Resolver:
-        def resolve(self, reference):
-            if (
-                failure_stage == "webhook_secret"
-                and reference.endswith("WEBHOOK_SECRET")
-            ):
-                raise RuntimeError("webhook secret unavailable")
-            return "resolved-secret"
-
-    def create_s3(*args, **kwargs):
-        if failure_stage == "s3":
-            raise RuntimeError("s3 construction failed")
-        return S3()
-
-    monkeypatch.setattr("issue_control.cli.PostgresIssueRepository", Repository)
-    monkeypatch.setattr("issue_control.cli.Redis", RedisFactory)
-    monkeypatch.setattr("issue_control.cli.GitHubReadOnlyClient", GitHub)
-    monkeypatch.setattr("issue_control.cli.boto3.client", create_s3)
-
-    with pytest.raises(
-        (GitHubPermissionError, RuntimeError),
-        match="unsafe permission|s3 construction failed|webhook secret unavailable",
-    ):
-        build_application(
-            IssueControlConfig.from_mapping(_valid_config()),
-            resolver=Resolver(),
-        )
-
-    assert cleanup == expected_cleanup
 
 
 class _RecordingS3:

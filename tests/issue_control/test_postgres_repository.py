@@ -436,16 +436,19 @@ def test_initial_triage_is_idempotent_and_rejects_later_states(
 
     triaged = repository.ensure_session_triaged(
         issue_key=observed.session.issue_key,
+        expected_session_id=observed.session.session_id,
         context=context,
         now=now,
     )
     repeated = repository.ensure_session_triaged(
         issue_key=observed.session.issue_key,
+        expected_session_id=observed.session.session_id,
         context=context,
         now=now,
     )
     planned = repository.transition_session(
         issue_key=observed.session.issue_key,
+        expected_session_id=observed.session.session_id,
         target=IssueState.PLANNED,
         expected_context_version=triaged.context_version,
         context=context,
@@ -457,6 +460,7 @@ def test_initial_triage_is_idempotent_and_rejects_later_states(
     with pytest.raises(RepositoryConflict, match="initial triage"):
         repository.ensure_session_triaged(
             issue_key=observed.session.issue_key,
+            expected_session_id=observed.session.session_id,
             context=context,
             now=now,
         )
@@ -598,6 +602,7 @@ def test_closed_issue_reopens_with_a_new_lifecycle_session(
     for target in transition_path:
         first = repository.transition_session(
             issue_key=first.issue_key,
+            expected_session_id=first.session_id,
             target=target,
             expected_context_version=first.context_version,
             context=context,
@@ -619,6 +624,65 @@ def test_closed_issue_reopens_with_a_new_lifecycle_session(
     assert reopened.session_id == "stable-issue-session:2"
     assert reopened.session_id != first.session_id
     assert repository.count_active_sessions(reopened.issue_key) == 1
+
+
+def test_stale_transition_cannot_cross_lifecycle_session_identity(
+    repository: PostgresIssueRepository,
+    now: datetime,
+) -> None:
+    context = _leader(repository, now)
+    first, _created = repository.claim_session(
+        issue_key="hotelbyte-com/hotel-be#22338",
+        candidate_session_id="session-lifecycle-cas",
+        risk_tier=RiskTier.LOW,
+        context=context,
+        now=now,
+    )
+    stale_context_version = first.context_version
+    for target in (
+        IssueState.TRIAGED,
+        IssueState.PLANNED,
+        IssueState.EXECUTING,
+        IssueState.REVIEWING,
+        IssueState.PR_OPEN,
+        IssueState.CHECKS_GREEN,
+        IssueState.MERGED,
+        IssueState.VERIFIED,
+        IssueState.CLOSED,
+    ):
+        first = repository.transition_session(
+            issue_key=first.issue_key,
+            expected_session_id=first.session_id,
+            target=target,
+            expected_context_version=first.context_version,
+            context=context,
+            now=now,
+        )
+    second, _created = repository.claim_session(
+        issue_key=first.issue_key,
+        candidate_session_id="session-lifecycle-cas",
+        risk_tier=RiskTier.LOW,
+        context=context,
+        now=now,
+    )
+
+    assert second.context_version == stale_context_version
+    with pytest.raises(RepositoryConflict, match="is not active"):
+        repository.transition_session(
+            issue_key=second.issue_key,
+            expected_session_id=first.session_id,
+            target=IssueState.TRIAGED,
+            expected_context_version=stale_context_version,
+            context=context,
+            now=now,
+        )
+    with pytest.raises(RepositoryConflict, match="is not active"):
+        repository.ensure_session_triaged(
+            issue_key=second.issue_key,
+            expected_session_id=first.session_id,
+            context=context,
+            now=now,
+        )
 
 
 def test_redis_loss_and_restart_leave_postgresql_event_and_session_truth_intact(
@@ -698,6 +762,7 @@ def test_s3_to_s5_failover_fences_old_leader_and_preserves_session(
     with pytest.raises(StaleFenceError):
         repository.transition_session(
             issue_key=session.issue_key,
+            expected_session_id=session.session_id,
             target=IssueState.TRIAGED,
             expected_context_version=session.context_version,
             context=s3,
@@ -718,6 +783,7 @@ def test_s3_to_s5_failover_fences_old_leader_and_preserves_session(
     )
     transitioned = repository.transition_session(
         issue_key=session.issue_key,
+        expected_session_id=adopted.session_id,
         target=IssueState.TRIAGED,
         expected_context_version=adopted.context_version,
         context=s5,
@@ -756,6 +822,63 @@ def test_s3_to_s5_failover_fences_old_leader_and_preserves_session(
         "s3": "standby",
         "s5": "leader",
     }
+
+
+def test_duplicate_replay_after_failover_adopts_epoch_and_triages(
+    repository: PostgresIssueRepository,
+    now: datetime,
+) -> None:
+    s3 = _leader(repository, now)
+    payload_store = _PayloadStore()
+    headers, body = _webhook(
+        delivery_id="delivery-failover-replay",
+        updated_at="2026-07-28T12:00:00Z",
+    )
+
+    class CrashBeforeTriage:
+        def observe_event(self, *args, **kwargs):
+            return repository.observe_event(*args, **kwargs)
+
+        def ensure_session_triaged(self, **kwargs):
+            raise RuntimeError("simulated leader loss before triage")
+
+    interrupted = IssueEventIngestor(
+        repository=CrashBeforeTriage(),
+        payload_store=payload_store,
+        webhook_secret="webhook-secret",
+        authorized_repositories=("hotelbyte-com/hotel-be",),
+    )
+    with pytest.raises(RuntimeError, match="leader loss"):
+        interrupted.ingest_webhook(
+            headers=headers,
+            body=body,
+            context=s3,
+            now=now,
+        )
+
+    repository.age_lease_for_test(timedelta(seconds=60))
+    takeover = repository.try_acquire_leadership(node_id="s5", now=now)
+    assert takeover.is_leader
+    s5 = MutationContext(
+        node_id="s5",
+        lease_epoch=takeover.lease_epoch,
+        run_id="test-failover-replay",
+    )
+    replay = IssueEventIngestor(
+        repository=repository,
+        payload_store=payload_store,
+        webhook_secret="webhook-secret",
+        authorized_repositories=("hotelbyte-com/hotel-be",),
+    ).ingest_webhook(
+        headers=headers,
+        body=body,
+        context=s5,
+        now=now,
+    )
+
+    assert replay.disposition is EventDisposition.DUPLICATE
+    assert replay.session.state is IssueState.TRIAGED
+    assert replay.session.lease_epoch == takeover.lease_epoch
 
 
 def test_expired_leader_cannot_renew_itself_after_takeover_window(
@@ -823,6 +946,7 @@ def test_new_event_projection_invalidates_stale_transition_context(
     with pytest.raises(StaleTransition):
         repository.transition_session(
             issue_key=initial.issue_key,
+            expected_session_id=initial.session_id,
             target=IssueState.TRIAGED,
             expected_context_version=initial.context_version,
             context=context,

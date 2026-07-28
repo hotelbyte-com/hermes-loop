@@ -46,7 +46,7 @@ jobs:
           command: uv sync --locked --python 3.11 --extra dev --extra issue-control
 
       - name: Run real PostgreSQL repository and failover contracts
-        run: scripts/run_tests.sh --include-integration tests/issue_control/test_postgres_repository.py
+        run: scripts/run_tests.sh --include-integration tests/issue_control/test_postgres_repository.py tests/issue_control/test_cli.py
         env:
           HERMES_ISSUE_CONTROL_TEST_POSTGRES_DSN: postgresql://hermes:hermes-test-only@127.0.0.1:5432/hermes_issue_control_test
 

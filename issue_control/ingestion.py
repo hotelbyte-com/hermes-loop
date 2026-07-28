@@ -53,6 +53,7 @@ class EventRepository(Protocol):
         self,
         *,
         issue_key: str,
+        expected_session_id: str,
         context: MutationContext,
         now: datetime,
     ) -> IssueSession: ...
@@ -240,6 +241,7 @@ class IssueEventIngestor:
         if session.state is IssueState.DISCOVERED:
             session = self._repository.ensure_session_triaged(
                 issue_key=stable_issue_key,
+                expected_session_id=session.session_id,
                 context=context,
                 now=now,
             )

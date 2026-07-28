@@ -532,44 +532,63 @@ class PostgresIssueRepository:
             if not row:
                 raise RepositoryConflict("active-session claim lost without a winner")
 
+        _row, session = self._adopt_locked_session_fence(
+            cursor,
+            row=row,
+            context=context,
+            now=now,
+        )
+        return session, False
+
+    def _adopt_locked_session_fence(
+        self,
+        cursor: Cursor[dict[str, Any]],
+        *,
+        row: dict[str, Any],
+        context: MutationContext,
+        now: datetime,
+    ) -> tuple[dict[str, Any], IssueSession]:
         session = self._session_from_row(row)
         if session.lease_epoch > context.lease_epoch:
             raise StaleFenceError("session is already owned by a newer fencing epoch")
-        if session.lease_epoch < context.lease_epoch:
-            adopted_context_version = _durable_context_version(
-                state=session.state,
-                state_revision=row["state_revision"],
-                github_version=row["last_github_version"],
-                github_tiebreaker=row["last_github_tiebreaker"],
-                lease_epoch=context.lease_epoch,
-            )
-            cursor.execute(
-                """
-                UPDATE issue_sessions
-                SET lease_epoch = %s,
-                    context_version = %s,
-                    updated_at = %s
-                WHERE session_id = %s
-                RETURNING *
-                """,
-                (
-                    context.lease_epoch,
-                    adopted_context_version,
-                    now,
-                    session.session_id,
-                ),
-            )
-            session = self._session_from_row(
-                _required_row(cursor.fetchone(), operation="adopt fencing epoch")
-            )
-            self._append_snapshot(
-                cursor,
-                session=session,
-                kind="fence_adopted",
-                context=context,
-                now=now,
-            )
-        return session, False
+        if session.lease_epoch == context.lease_epoch:
+            return row, session
+        adopted_context_version = _durable_context_version(
+            state=session.state,
+            state_revision=row["state_revision"],
+            github_version=row["last_github_version"],
+            github_tiebreaker=row["last_github_tiebreaker"],
+            lease_epoch=context.lease_epoch,
+        )
+        cursor.execute(
+            """
+            UPDATE issue_sessions
+            SET lease_epoch = %s,
+                context_version = %s,
+                updated_at = %s
+            WHERE session_id = %s
+            RETURNING *
+            """,
+            (
+                context.lease_epoch,
+                adopted_context_version,
+                now,
+                session.session_id,
+            ),
+        )
+        adopted_row = _required_row(
+            cursor.fetchone(),
+            operation="adopt fencing epoch",
+        )
+        adopted = self._session_from_row(adopted_row)
+        self._append_snapshot(
+            cursor,
+            session=adopted,
+            kind="fence_adopted",
+            context=context,
+            now=now,
+        )
+        return adopted_row, adopted
 
     def claim_session(
         self,
@@ -701,6 +720,7 @@ class PostgresIssueRepository:
         self,
         *,
         issue_key: str,
+        expected_session_id: str,
         target: IssueState,
         expected_context_version: int,
         context: MutationContext,
@@ -713,14 +733,18 @@ class PostgresIssueRepository:
                 """
                 SELECT *
                 FROM issue_sessions
-                WHERE issue_key = %s AND ended_at IS NULL
+                WHERE issue_key = %s
+                  AND session_id = %s
+                  AND ended_at IS NULL
                 FOR UPDATE
                 """,
-                (canonical_issue_key,),
+                (canonical_issue_key, expected_session_id),
             )
             row = cursor.fetchone()
             if not row:
-                raise RepositoryError(f"no active session for {canonical_issue_key}")
+                raise RepositoryConflict(
+                    f"expected session {expected_session_id!r} is not active"
+                )
             return self._transition_locked_session(
                 cursor,
                 row=row,
@@ -734,6 +758,7 @@ class PostgresIssueRepository:
         self,
         *,
         issue_key: str,
+        expected_session_id: str,
         context: MutationContext,
         now: datetime,
     ) -> IssueSession:
@@ -744,15 +769,24 @@ class PostgresIssueRepository:
                 """
                 SELECT *
                 FROM issue_sessions
-                WHERE issue_key = %s AND ended_at IS NULL
+                WHERE issue_key = %s
+                  AND session_id = %s
+                  AND ended_at IS NULL
                 FOR UPDATE
                 """,
-                (canonical_issue_key,),
+                (canonical_issue_key, expected_session_id),
             )
             row = cursor.fetchone()
             if not row:
-                raise RepositoryError(f"no active session for {canonical_issue_key}")
-            session = self._session_from_row(row)
+                raise RepositoryConflict(
+                    f"expected session {expected_session_id!r} is not active"
+                )
+            row, session = self._adopt_locked_session_fence(
+                cursor,
+                row=row,
+                context=context,
+                now=now,
+            )
             if session.state is IssueState.TRIAGED:
                 return session
             if session.state is not IssueState.DISCOVERED:
