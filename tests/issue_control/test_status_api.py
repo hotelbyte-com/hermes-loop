@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+import logging
 
 from fastapi.testclient import TestClient
 from fastapi.routing import APIRoute
@@ -130,6 +131,22 @@ def test_readiness_remains_true_during_redis_loss_when_postgres_and_read_scope_a
     }
 
 
+def test_readiness_logs_postgres_failure_and_remains_fail_closed(caplog) -> None:
+    service = _service()
+
+    def fail_ping():
+        raise RuntimeError("postgres unavailable")
+
+    service._repository.ping = fail_ping
+    with caplog.at_level(logging.ERROR, logger="issue_control.status"):
+        readiness = service.readiness()
+
+    assert readiness["ready"] is False
+    assert readiness["postgres"] is False
+    assert "PostgreSQL readiness check failed" in caplog.text
+    assert "postgres unavailable" in caplog.text
+
+
 def test_internal_status_app_is_read_only_and_returns_distinct_health_and_ready() -> (
     None
 ):
@@ -166,6 +183,15 @@ class _Runtime:
 
     def ingest_webhook(self, *, headers, body):
         return {"size": len(body)}
+
+
+class _Closeable:
+    def __init__(self, name, events):
+        self.name = name
+        self.events = events
+
+    def close(self):
+        self.events.append(self.name)
 
 
 def test_production_app_reuses_status_routes_and_bounds_webhook_body(
@@ -205,6 +231,23 @@ def test_production_app_reuses_status_routes_and_bounds_webhook_body(
     assert oversized.status_code == 413
     assert accepted.status_code == 202
     assert len(threadpool_calls) == 1
+
+
+def test_production_app_closes_owned_clients_in_reverse_order() -> None:
+    events = []
+    first = _Closeable("redis", events)
+    second = _Closeable("github", events)
+    third = _Closeable("s3", events)
+    app = create_control_plane_app(
+        status_service=_service(),
+        runtime=_Runtime(),
+        close_callbacks=(first.close, second.close, third.close),
+    )
+
+    with TestClient(app):
+        assert events == []
+
+    assert events == ["s3", "github", "redis"]
 
 
 def test_reconciliation_trace_filters_reject_invalid_queries() -> None:

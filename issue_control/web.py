@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
+from collections.abc import Callable
 from dataclasses import asdict, is_dataclass
 from typing import Any
 
@@ -18,14 +19,18 @@ def create_control_plane_app(
     *,
     status_service: InternalStatusService,
     runtime: IssueControlRuntime,
+    close_callbacks: tuple[Callable[[], None], ...] = (),
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        runtime.start()
-        try:
-            yield
-        finally:
-            runtime.stop()
+        async with AsyncExitStack() as stack:
+            for callback in close_callbacks:
+                stack.callback(callback)
+            runtime.start()
+            try:
+                yield
+            finally:
+                runtime.stop()
 
     app = FastAPI(
         title="Hermes Issue Control Plane",

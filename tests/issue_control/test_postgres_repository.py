@@ -386,6 +386,40 @@ def test_concurrent_duplicate_events_converge_to_one_fact(
     assert repository.event_count(event.issue_key) == 1
 
 
+def test_concurrent_duplicate_webhooks_converge_through_initial_triage(
+    repository: PostgresIssueRepository,
+    now: datetime,
+) -> None:
+    context = _leader(repository, now)
+    ingestor = IssueEventIngestor(
+        repository=repository,
+        payload_store=_PayloadStore(),
+        webhook_secret="webhook-secret",
+        authorized_repositories=("hotelbyte-com/hotel-be",),
+    )
+    body, headers = _signed_webhook(
+        updated_at="2026-07-28T12:00:00Z",
+        delivery="delivery-concurrent-webhook",
+    )
+
+    def ingest(_attempt: int):
+        return ingestor.ingest_webhook(
+            headers=headers,
+            body=body,
+            context=context,
+            now=now,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(ingest, range(2)))
+
+    assert {result.disposition for result in results} == {
+        EventDisposition.APPLIED,
+        EventDisposition.DUPLICATE,
+    }
+    assert all(result.session.state is IssueState.TRIAGED for result in results)
+
+
 def test_reconciliation_replay_converges_through_real_repository(
     repository: PostgresIssueRepository,
     now: datetime,
@@ -764,9 +798,13 @@ def test_reconciliation_status_measures_lag_and_classification_coverage(
         context=context,
         now=now,
     )
+    repository.age_reconciliation_for_test(
+        "hotelbyte-com/hotel-be",
+        timedelta(seconds=25),
+    )
 
     status = repository.control_status(
-        now=now + timedelta(seconds=25),
+        now=now + timedelta(days=365),
         authorized_repositories=(
             "hotelbyte-com/hotel-be",
             "hotelbyte-com/hotel-fe",
@@ -774,6 +812,6 @@ def test_reconciliation_status_measures_lag_and_classification_coverage(
     )
 
     assert status["reconciliation"][0]["classified"] is True
-    assert status["reconciliation"][0]["lag_seconds"] == 25
+    assert 25 <= status["reconciliation"][0]["lag_seconds"] < 27
     assert status["reconciliation"][1]["classified"] is False
     assert status["reconciliation"][1]["lag_seconds"] is None

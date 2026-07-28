@@ -18,6 +18,7 @@ from issue_control.repository import (
     ObservationResult,
 )
 from issue_control.reconciliation import ReconciliationService
+from issue_control.state_machine import StaleTransition
 
 
 NOW = datetime(2026, 7, 28, 12, 0, tzinfo=UTC)
@@ -87,6 +88,9 @@ class _Repository:
         )
         self.sessions[issue_key] = transitioned
         return transitioned
+
+    def get_session(self, issue_key):
+        return self.sessions[issue_key]
 
     def record_reconciliation_started(self, repository, run_id, context, now):
         self.reconciliation_calls.append(("started", repository, run_id, context, now))
@@ -178,6 +182,37 @@ def test_signed_webhook_is_sanitized_observed_and_classified() -> None:
     assert event.event_id == "github:delivery-1"
     assert event.sanitized_payload_ref.startswith("s3://events/")
     assert store.payloads[0]["issue"]["title"] == "Authorization bypass"
+
+
+def test_concurrent_initial_triage_accepts_already_achieved_state() -> None:
+    class RacingRepository(_Repository):
+        def transition_session(self, **kwargs):
+            current = self.sessions[kwargs["issue_key"]]
+            self.sessions[kwargs["issue_key"]] = replace(
+                current,
+                state=IssueState.TRIAGED,
+                context_version=current.context_version + 1,
+            )
+            raise StaleTransition("concurrent triage won the context CAS")
+
+    repository = RacingRepository()
+    ingestor = IssueEventIngestor(
+        repository=repository,
+        payload_store=_PayloadStore(),
+        webhook_secret="webhook-secret",
+        authorized_repositories=("hotelbyte-com/hotel-be",),
+    )
+    body = _webhook_body()
+
+    result = ingestor.ingest_webhook(
+        headers=_headers(body),
+        body=body,
+        context=MutationContext(node_id="s3", lease_epoch=7, run_id="run-race"),
+        now=NOW,
+    )
+
+    assert result.disposition is EventDisposition.APPLIED
+    assert result.session.state is IssueState.TRIAGED
 
 
 @pytest.mark.parametrize(

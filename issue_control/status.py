@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import UTC, datetime
+import logging
 from typing import Any, Protocol
 
 from fastapi import (
@@ -14,6 +15,8 @@ from fastapi import (
     Response,
     status as http_status,
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class StatusRepository(Protocol):
@@ -78,6 +81,7 @@ class InternalStatusService:
         try:
             postgres_ready = bool(self._repository.ping())
         except Exception:
+            _LOGGER.exception("PostgreSQL readiness check failed")
             postgres_ready = False
         github_read_only = bool(self._github.permissions_verified)
         return {

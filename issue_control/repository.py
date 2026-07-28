@@ -331,11 +331,11 @@ class PostgresIssueRepository:
                 UPDATE issue_control_nodes
                 SET ready = %s,
                     observed_epoch = %s,
-                    last_seen_at = %s,
+                    last_seen_at = clock_timestamp(),
                     detail = %s
                 WHERE node_id = %s
                 """,
-                (ready, observed_epoch, now, Jsonb(detail), node_id),
+                (ready, observed_epoch, Jsonb(detail), node_id),
             )
             if cursor.rowcount != 1:
                 raise RepositoryError(f"node {node_id!r} is not configured")
@@ -917,7 +917,7 @@ class PostgresIssueRepository:
                     repository, run_id, started_at, completed_at,
                     open_issue_count, observed_issue_count, error, lease_epoch
                 )
-                VALUES (%s, %s, %s, NULL, 0, 0, NULL, %s)
+                VALUES (%s, %s, clock_timestamp(), NULL, 0, 0, NULL, %s)
                 ON CONFLICT (repository) DO UPDATE
                 SET run_id = EXCLUDED.run_id,
                     started_at = EXCLUDED.started_at,
@@ -927,7 +927,7 @@ class PostgresIssueRepository:
                     error = NULL,
                     lease_epoch = EXCLUDED.lease_epoch
                 """,
-                (repository, run_id, now, context.lease_epoch),
+                (repository, run_id, context.lease_epoch),
             )
 
     def record_reconciliation_completed(
@@ -946,7 +946,7 @@ class PostgresIssueRepository:
             cursor.execute(
                 """
                 UPDATE issue_reconciliation_status
-                SET completed_at = %s,
+                SET completed_at = clock_timestamp(),
                     newest_github_updated_at = %s,
                     open_issue_count = %s,
                     observed_issue_count = %s,
@@ -955,7 +955,6 @@ class PostgresIssueRepository:
                 WHERE repository = %s AND run_id = %s
                 """,
                 (
-                    now,
                     newest_github_updated_at,
                     open_issue_count,
                     observed_issue_count,
@@ -982,13 +981,12 @@ class PostgresIssueRepository:
             cursor.execute(
                 """
                 UPDATE issue_reconciliation_status
-                SET completed_at = %s,
+                SET completed_at = clock_timestamp(),
                     error = %s,
                     lease_epoch = %s
                 WHERE repository = %s AND run_id = %s
                 """,
                 (
-                    now,
                     error[:1024],
                     context.lease_epoch,
                     repository,
@@ -1020,7 +1018,8 @@ class PostgresIssueRepository:
         with self._transaction() as (_connection, cursor):
             cursor.execute(
                 """
-                SELECT leader_node, lease_epoch, renewed_at
+                SELECT leader_node, lease_epoch, renewed_at,
+                       clock_timestamp() AS database_now
                 FROM issue_control_leases
                 WHERE cluster_name = %s
                 """,
@@ -1029,7 +1028,11 @@ class PostgresIssueRepository:
             lease = cursor.fetchone()
             if not lease:
                 raise RepositoryError("cluster is not bootstrapped")
-            lease_age = max(0.0, (now - lease["renewed_at"]).total_seconds())
+            database_now = lease["database_now"]
+            lease_age = max(
+                0.0,
+                (database_now - lease["renewed_at"]).total_seconds(),
+            )
             cursor.execute(
                 """
                 SELECT node_id, configured_role, ready, observed_epoch,
@@ -1041,7 +1044,10 @@ class PostgresIssueRepository:
             nodes = []
             for row in cursor.fetchall():
                 heartbeat_age = (
-                    max(0.0, (now - row["last_seen_at"]).total_seconds())
+                    max(
+                        0.0,
+                        (database_now - row["last_seen_at"]).total_seconds(),
+                    )
                     if row["last_seen_at"]
                     else None
                 )
@@ -1092,7 +1098,10 @@ class PostgresIssueRepository:
                     })
                     continue
                 lag = (
-                    max(0.0, (now - row["completed_at"]).total_seconds())
+                    max(
+                        0.0,
+                        (database_now - row["completed_at"]).total_seconds(),
+                    )
                     if row["completed_at"]
                     else None
                 )
@@ -1181,6 +1190,27 @@ class PostgresIssueRepository:
             )
             if cursor.rowcount != 1:
                 raise RepositoryError("cluster is not bootstrapped")
+
+    def age_reconciliation_for_test(
+        self,
+        repository: str,
+        elapsed: timedelta,
+    ) -> None:
+        if not self.schema.startswith("issue_control_test_"):
+            raise RepositoryError("refusing to alter non-test reconciliation status")
+        if elapsed < timedelta(0):
+            raise ValueError("reconciliation age must be non-negative")
+        with self._transaction() as (_connection, cursor):
+            cursor.execute(
+                """
+                UPDATE issue_reconciliation_status
+                SET completed_at = clock_timestamp() - %s
+                WHERE repository = %s
+                """,
+                (elapsed, repository),
+            )
+            if cursor.rowcount != 1:
+                raise RepositoryError("reconciliation status is not recorded")
 
     def drop_schema_for_test(self) -> None:
         if not self.schema.startswith("issue_control_test_"):

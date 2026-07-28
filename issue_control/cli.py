@@ -115,6 +115,11 @@ def build_application(
     return create_control_plane_app(
         status_service=status_service,
         runtime=runtime,
+        close_callbacks=(
+            redis_client.close,
+            github.close,
+            s3_client.close,
+        ),
     )
 
 
