@@ -129,7 +129,8 @@ or fencing.
 ## HTTP surfaces
 
 - `POST /github/events` — signed GitHub `issues` and `issue_comment` ingress.
-  Bodies are limited to 1 MiB, allowlisted, redacted, then stored in S3.
+  Bodies are limited to 1 MiB, allowlisted, redacted, then stored in S3. Only
+  the current PostgreSQL leader accepts the event; a standby returns `503`.
 - `GET /internal/health` — process liveness.
 - `GET /internal/ready` — PostgreSQL and verified read-only GitHub readiness;
   reports Redis independently because Redis is not authoritative.
@@ -139,8 +140,9 @@ or fencing.
 - `GET /internal/reconciliation` — per-repository run, count, error, epoch, and
   lag projection.
 
-Expose `/github/events` through the authenticated/TLS GitHub App ingress. Keep
-`/internal/*` on a private network or behind internal authentication.
+Expose `/github/events` through the authenticated/TLS GitHub App ingress and
+route or retry delivery to the current leader. Keep `/internal/*` on a private
+network or behind internal authentication.
 
 ## Deterministic replay
 

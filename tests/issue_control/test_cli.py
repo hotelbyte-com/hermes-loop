@@ -84,9 +84,8 @@ def test_application_startup_failure_closes_constructed_clients(
 
     class Resolver:
         def resolve(self, reference):
-            if (
-                failure_stage == "webhook_secret"
-                and reference.endswith("WEBHOOK_SECRET")
+            if failure_stage == "webhook_secret" and reference.endswith(
+                "WEBHOOK_SECRET"
             ):
                 raise RuntimeError("webhook secret unavailable")
             return "resolved-secret"

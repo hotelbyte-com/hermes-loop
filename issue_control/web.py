@@ -3,22 +3,35 @@
 from __future__ import annotations
 
 from contextlib import AsyncExitStack, asynccontextmanager
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, is_dataclass
-from typing import Any
+from typing import Any, Protocol
 
 from fastapi import FastAPI, HTTPException, Request, status as http_status
 from starlette.concurrency import run_in_threadpool
 
 from issue_control.ingestion import GitHubWebhookError, MAX_WEBHOOK_BYTES
-from issue_control.runtime import IssueControlRuntime, NotLeaderError
+from issue_control.runtime import NotLeaderError
 from issue_control.status import InternalStatusService, create_status_router
+
+
+class _ControlPlaneRuntime(Protocol):
+    def start(self) -> None: ...
+
+    def stop(self) -> None: ...
+
+    def ingest_webhook(
+        self,
+        *,
+        headers: Mapping[str, str],
+        body: bytes,
+    ) -> Any: ...
 
 
 def create_control_plane_app(
     *,
     status_service: InternalStatusService,
-    runtime: IssueControlRuntime,
+    runtime: _ControlPlaneRuntime,
     close_callbacks: tuple[Callable[[], None], ...] = (),
 ) -> FastAPI:
     @asynccontextmanager

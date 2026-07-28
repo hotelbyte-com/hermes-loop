@@ -301,7 +301,8 @@ def test_same_version_events_converge_independently_of_delivery_order(
     assert stale.session.context_version == larger_first.session.context_version
     assert applied.session.context_version != smaller_first.session.context_version
     assert [
-        mutation.kind for mutation in repository.list_session_mutations(smaller.issue_key)
+        mutation.kind
+        for mutation in repository.list_session_mutations(smaller.issue_key)
     ] == [
         mutation.kind
         for mutation in repository.list_session_mutations(other_smaller.issue_key)
@@ -427,7 +428,9 @@ def test_initial_triage_is_idempotent_and_rejects_later_states(
 ) -> None:
     context = _leader(repository, now)
     observed = repository.observe_event(
-        _event(event_id="delivery-idempotent-triage", github_version=1, occurred_at=now),
+        _event(
+            event_id="delivery-idempotent-triage", github_version=1, occurred_at=now
+        ),
         candidate_session_id="session-idempotent-triage",
         risk_tier=RiskTier.LOW,
         context=context,
@@ -505,8 +508,7 @@ def test_concurrent_reordered_webhooks_converge_through_initial_triage(
 
     assert all(result.session.state is IssueState.TRIAGED for result in results)
     assert (
-        repository.get_session(results[0].session.issue_key).state
-        is IssueState.TRIAGED
+        repository.get_session(results[0].session.issue_key).state is IssueState.TRIAGED
     )
     assert repository.event_count(results[0].session.issue_key) == 2
 

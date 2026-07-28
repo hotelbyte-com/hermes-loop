@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import os
+from typing import Protocol
 
 
 class SecretResolutionError(RuntimeError):
     """A configured credential reference cannot be resolved."""
+
+
+class SecretResolver(Protocol):
+    def resolve(self, reference: str) -> str: ...
 
 
 class EnvironmentSecretResolver:
@@ -28,7 +33,7 @@ class EnvironmentSecretResolver:
         return value
 
 
-def resolve_if_reference(value: str, resolver: EnvironmentSecretResolver) -> str:
+def resolve_if_reference(value: str, resolver: SecretResolver) -> str:
     if value.startswith("secret://"):
         return resolver.resolve(value)
     return value

@@ -26,7 +26,11 @@ from issue_control.payloads import S3SanitizedPayloadStore
 from issue_control.reconciliation import ReconciliationService
 from issue_control.repository import PostgresIssueRepository
 from issue_control.runtime import IssueControlRuntime
-from issue_control.secrets import EnvironmentSecretResolver, resolve_if_reference
+from issue_control.secrets import (
+    EnvironmentSecretResolver,
+    SecretResolver,
+    resolve_if_reference,
+)
 from issue_control.status import InternalStatusService
 from issue_control.web import create_control_plane_app
 
@@ -41,7 +45,7 @@ def load_config(path: Path) -> IssueControlConfig:
 def build_application(
     config: IssueControlConfig,
     *,
-    resolver: EnvironmentSecretResolver | None = None,
+    resolver: SecretResolver | None = None,
 ):
     secret_resolver = resolver or EnvironmentSecretResolver()
     postgres_dsn = resolve_if_reference(config.postgres_dsn, secret_resolver)
@@ -86,9 +90,7 @@ def build_application(
         ingestor = IssueEventIngestor(
             repository=repository,
             payload_store=cast(PayloadStore, payload_store),
-            webhook_secret=secret_resolver.resolve(
-                config.github.webhook_secret_ref
-            ),
+            webhook_secret=secret_resolver.resolve(config.github.webhook_secret_ref),
             authorized_repositories=config.authorized_repositories,
         )
         reconciliation = ReconciliationService(

@@ -99,10 +99,9 @@ class IssueEvent:
             or self.occurred_at.utcoffset() is None
         ):
             raise ValueError("occurred_at must be timezone-aware")
-        if (
-            not isinstance(self.sanitized_payload_ref, str)
-            or not _S3_REFERENCE_RE.fullmatch(self.sanitized_payload_ref)
-        ):
+        if not isinstance(
+            self.sanitized_payload_ref, str
+        ) or not _S3_REFERENCE_RE.fullmatch(self.sanitized_payload_ref):
             raise ValueError("sanitized_payload_ref must use s3://")
         if len(self.sanitized_payload_ref) > 2048:
             raise ValueError("sanitized_payload_ref exceeds 2048 characters")

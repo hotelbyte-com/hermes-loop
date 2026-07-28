@@ -1,5 +1,6 @@
 from datetime import UTC, datetime
 import logging
+from typing import Any, cast
 
 from fastapi.testclient import TestClient
 from fastapi.routing import APIRoute
@@ -137,7 +138,7 @@ def test_readiness_logs_postgres_failure_and_remains_fail_closed(caplog) -> None
     def fail_ping():
         raise RuntimeError("postgres unavailable")
 
-    service._repository.ping = fail_ping
+    cast(Any, service._repository).ping = fail_ping
     with caplog.at_level(logging.ERROR, logger="issue_control.status"):
         readiness = service.readiness()
 
