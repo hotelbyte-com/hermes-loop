@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+import logging
 from typing import Any, Mapping, Protocol
 
 from issue_control.ingestion import IssueEventIngestor, _parse_github_time
@@ -11,6 +12,7 @@ from issue_control.repository import MutationContext
 
 
 DEFAULT_RECONCILIATION_INTERVAL_SECONDS = 300
+logger = logging.getLogger(__name__)
 
 
 class GitHubIssueReader(Protocol):
@@ -120,6 +122,10 @@ class ReconciliationService:
                 )
             except Exception as exc:
                 error = f"{type(exc).__name__}: {exc}"[:1024]
+                logger.exception(
+                    "issue-control reconciliation failed for %s",
+                    repository_name,
+                )
                 failures[repository_name] = error
                 self._repository.record_reconciliation_failed(
                     repository_name,

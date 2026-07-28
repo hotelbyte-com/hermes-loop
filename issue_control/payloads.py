@@ -42,11 +42,11 @@ class PayloadSanitizer:
             },
             "issue": {
                 "number": number,
-                "title": _redact(_bounded_text(issue.get("title"), 512)),
-                "body": _redact(_bounded_text(issue.get("body"), 4096)),
+                "title": _bounded_redacted_text(issue.get("title"), 512),
+                "body": _bounded_redacted_text(issue.get("body"), 4096),
                 "state": _bounded_text(issue.get("state"), 32),
                 "labels": [
-                    _redact(_bounded_text(label.get("name"), 128))
+                    _bounded_redacted_text(label.get("name"), 128)
                     for label in labels[:50]
                     if isinstance(label, Mapping) and label.get("name")
                 ],
@@ -103,6 +103,12 @@ def _bounded_text(value: Any, limit: int) -> str:
     if value is None:
         return ""
     return str(value)[:limit]
+
+
+def _bounded_redacted_text(value: Any, limit: int) -> str:
+    if value is None:
+        return ""
+    return _redact(str(value))[:limit]
 
 
 def _required_mapping(value: Any, field: str) -> Mapping[str, Any]:

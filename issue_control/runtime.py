@@ -10,7 +10,11 @@ from typing import Any, Protocol
 from uuid import uuid4
 
 from issue_control.coordination import LeaderTick
-from issue_control.repository import LeadershipDecision, MutationContext
+from issue_control.repository import (
+    LeadershipDecision,
+    MutationContext,
+    StaleFenceError,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -101,11 +105,17 @@ class IssueControlRuntime:
     def reconcile_once(self) -> Any:
         run_id = self._run_id_factory("reconciliation")
         context = self._mutation_context(run_id)
-        return self._reconciler.run_once(
-            context=context,
-            now=self._clock(),
-            run_id=run_id,
-        )
+        try:
+            return self._reconciler.run_once(
+                context=context,
+                now=self._clock(),
+                run_id=run_id,
+            )
+        except StaleFenceError as exc:
+            self._reject_stale_context(context)
+            raise NotLeaderError(
+                "PostgreSQL rejected this node's stale leadership fence"
+            ) from exc
 
     def ingest_webhook(
         self,
@@ -122,12 +132,18 @@ class IssueControlRuntime:
             "unknown",
         )
         context = self._mutation_context(f"webhook-{delivery_id}")
-        result = self._ingestor.ingest_webhook(
-            headers=headers,
-            body=body,
-            context=context,
-            now=self._clock(),
-        )
+        try:
+            result = self._ingestor.ingest_webhook(
+                headers=headers,
+                body=body,
+                context=context,
+                now=self._clock(),
+            )
+        except StaleFenceError as exc:
+            self._reject_stale_context(context)
+            raise NotLeaderError(
+                "PostgreSQL rejected this node's stale leadership fence"
+            ) from exc
         event_id = (
             result.get("event_id")
             if isinstance(result, dict)
@@ -160,8 +176,18 @@ class IssueControlRuntime:
     def stop(self) -> None:
         self._stop.set()
         for thread in self._threads:
-            thread.join(timeout=max(1, self._renewal_interval_seconds + 1))
+            thread.join()
         self._threads.clear()
+
+    def _reject_stale_context(self, context: MutationContext) -> None:
+        with self._leadership_lock:
+            decision = self._leadership
+            if (
+                decision is not None
+                and decision.node_id == context.node_id
+                and decision.lease_epoch == context.lease_epoch
+            ):
+                self._leadership = None
 
     def _renewal_loop(self) -> None:
         while not self._stop.wait(self._renewal_interval_seconds):

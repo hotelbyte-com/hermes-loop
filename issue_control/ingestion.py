@@ -178,7 +178,15 @@ class IssueEventIngestor:
         sanitized = self._sanitize_and_authorize(raw)
         key = issue_key(repository, int(issue["number"]))
         github_version = _github_version(sanitized["issue"]["updated_at"])
-        identity = f"{key}:{github_version}:issues.reconciled"
+        payload_identity = hashlib.sha256(
+            json.dumps(
+                sanitized,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        identity = f"{key}:{github_version}:issues.reconciled:{payload_identity}"
         event_id = "reconcile:" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
         return self._observe(
             sanitized=sanitized,

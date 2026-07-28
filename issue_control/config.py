@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Any, Mapping
+from urllib.parse import parse_qsl, urlsplit
 
 from issue_control.contracts import issue_key
 
 
 class ConfigError(ValueError):
     """Configuration is unsafe, ambiguous, or unsupported in Phase 1A."""
+
+
+_SECRET_REFERENCE_RE = re.compile(r"^secret://env/[A-Za-z0-9_]+$")
+_CREDENTIAL_QUERY_FRAGMENTS = ("password", "secret", "token", "api_key", "apikey")
 
 
 def _strict_keys(
@@ -185,13 +191,39 @@ class IssueControlConfig:
             ("postgres_dsn", config.postgres_dsn),
             ("redis_url", config.redis_url),
         ):
-            if value.startswith("secret://") and not value.startswith("secret://env/"):
-                raise ConfigError(
-                    f"{field} secret references must use secret://env/NAME"
-                )
+            _validate_service_location(field, value)
         if not (1 <= config.internal_port <= 65535):
             raise ConfigError("internal_port is outside the valid TCP range")
         return config
+
+
+def _validate_service_location(field: str, value: str) -> None:
+    if value.startswith("secret://"):
+        if not _SECRET_REFERENCE_RE.fullmatch(value):
+            raise ConfigError(f"{field} secret references must use secret://env/NAME")
+        return
+    try:
+        parsed = urlsplit(value)
+        _parsed_port = parsed.port
+    except ValueError as exc:
+        raise ConfigError(f"{field} must be a valid credential-free service URL") from exc
+    allowed_schemes = (
+        {"postgres", "postgresql"}
+        if field == "postgres_dsn"
+        else {"redis", "rediss"}
+    )
+    if (
+        parsed.scheme.casefold() not in allowed_schemes
+        or not parsed.hostname
+        or parsed.fragment
+    ):
+        raise ConfigError(f"{field} must be a supported credential-free service URL")
+    if parsed.password is not None:
+        raise ConfigError(f"{field} must not contain credentials in config.yaml")
+    for key, _value in parse_qsl(parsed.query, keep_blank_values=True):
+        normalized = key.casefold().replace("-", "_")
+        if any(fragment in normalized for fragment in _CREDENTIAL_QUERY_FRAGMENTS):
+            raise ConfigError(f"{field} must not contain credentials in config.yaml")
 
 
 def _canonical_repository(repository: str) -> str:

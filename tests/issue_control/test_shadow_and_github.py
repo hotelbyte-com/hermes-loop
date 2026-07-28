@@ -76,6 +76,30 @@ def test_phase_1a_failover_cadence_is_fixed(
 
 
 @pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("postgres_dsn", "postgresql://user:password@postgres/hermes"),
+        ("postgres_dsn", "host=postgres dbname=hermes password=secret"),
+        ("postgres_dsn", "postgresql://postgres/hermes?sslpassword=secret"),
+        ("redis_url", "redis://:password@redis:6379/0"),
+        ("redis_url", "redis://redis:6379/0?token=secret"),
+        ("redis_url", "unix:///run/redis.sock"),
+        ("redis_url", "secret://vault/redis"),
+        ("redis_url", "secret://env/"),
+    ],
+)
+def test_service_locations_reject_credentials_and_unsupported_dsns(
+    field: str,
+    value: str,
+) -> None:
+    raw = _valid_config()
+    raw[field] = value
+
+    with pytest.raises(ConfigError, match="credential|supported|secret"):
+        IssueControlConfig.from_mapping(raw)
+
+
+@pytest.mark.parametrize(
     ("path", "value"),
     [
         (("github", "token"), "ghp_write"),
@@ -206,3 +230,31 @@ def test_payload_store_is_bounded_sanitized_content_addressed_and_encrypted() ->
     assert "[REDACTED]" in body["issue"]["body"]
     assert "must-not-persist" not in serialized
     assert "alice@example.com" not in serialized
+
+
+def test_payload_redacts_complete_private_key_before_bounding() -> None:
+    private_key = (
+        "-----BEGIN PRIVATE KEY-----\n"
+        + ("sensitive-key-material\n" * 300)
+        + "-----END PRIVATE KEY-----"
+    )
+    raw = {
+        "action": "opened",
+        "repository": {"full_name": "hotelbyte-com/hotel-be"},
+        "issue": {
+            "number": 22338,
+            "title": "Security report",
+            "body": private_key,
+            "state": "open",
+            "labels": [],
+            "user": {"login": "reporter"},
+            "updated_at": "2026-07-28T01:02:03Z",
+            "html_url": "https://github.com/hotelbyte-com/hotel-be/issues/22338",
+        },
+        "sender": {"login": "reporter", "type": "User"},
+    }
+
+    sanitized = PayloadSanitizer().sanitize_issue_event(raw)
+
+    assert sanitized["issue"]["body"] == "[REDACTED]"
+    assert "sensitive-key-material" not in json.dumps(sanitized)

@@ -3,6 +3,7 @@ from datetime import UTC, datetime, timedelta
 import hashlib
 import hmac
 import json
+import logging
 from typing import Any, Mapping
 
 import pytest
@@ -405,3 +406,68 @@ def test_reconciliation_event_identity_is_deterministic_across_replay() -> None:
     assert (
         repository.events[0][0].github_version == repository.events[1][0].github_version
     )
+
+
+def test_reconciliation_identity_retains_distinct_same_timestamp_payloads() -> None:
+    repository = _Repository()
+    ingestor = IssueEventIngestor(
+        repository=repository,
+        payload_store=_PayloadStore(),
+        webhook_secret="webhook-secret",
+        authorized_repositories=("hotelbyte-com/hotel-be",),
+    )
+    first = _GitHub().list_open_issues("hotelbyte-com/hotel-be")[0]
+    second = {**first, "title": "Different observation at the same timestamp"}
+    context = MutationContext(
+        node_id="s3",
+        lease_epoch=9,
+        run_id="reconciliation-same-timestamp",
+    )
+
+    for issue in (first, second, second):
+        ingestor.ingest_reconciliation_issue(
+            repository="hotelbyte-com/hotel-be",
+            issue=issue,
+            context=context,
+            now=NOW,
+        )
+
+    event_ids = [event.event_id for event, _context, _now in repository.events]
+    assert event_ids[0] != event_ids[1]
+    assert event_ids[1] == event_ids[2]
+
+
+def test_reconciliation_logs_traceback_and_persists_bounded_failure(caplog) -> None:
+    class FailingGitHub:
+        def list_open_issues(self, repository: str) -> list[dict]:
+            raise RuntimeError("GitHub unavailable")
+
+    repository = _Repository()
+    service = ReconciliationService(
+        repository=repository,
+        github=FailingGitHub(),
+        ingestor=IssueEventIngestor(
+            repository=repository,
+            payload_store=_PayloadStore(),
+            webhook_secret="webhook-secret",
+            authorized_repositories=("hotelbyte-com/hotel-be",),
+        ),
+        authorized_repositories=("hotelbyte-com/hotel-be",),
+    )
+
+    with caplog.at_level(logging.ERROR, logger="issue_control.reconciliation"):
+        summary = service.run_once(
+            context=MutationContext(
+                node_id="s3",
+                lease_epoch=9,
+                run_id="reconciliation-failure",
+            ),
+            now=NOW,
+            run_id="reconciliation-failure",
+        )
+
+    assert summary.failures == {
+        "hotelbyte-com/hotel-be": "RuntimeError: GitHub unavailable"
+    }
+    assert caplog.records[-1].exc_info is not None
+    assert repository.reconciliation_calls[-1][0] == "failed"

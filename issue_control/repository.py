@@ -405,6 +405,76 @@ class PostgresIssueRepository:
             self._session_from_row(existing_session),
         )
 
+    def _closed_session_for_stale_event(
+        self,
+        cursor: Cursor[dict[str, Any]],
+        event: IssueEvent,
+    ) -> IssueSession | None:
+        cursor.execute(
+            """
+            SELECT session_id
+            FROM issue_sessions
+            WHERE issue_key = %s AND ended_at IS NULL
+            FOR UPDATE
+            """,
+            (event.issue_key,),
+        )
+        if cursor.fetchone():
+            return None
+        cursor.execute(
+            """
+            SELECT *
+            FROM issue_sessions
+            WHERE issue_key = %s AND ended_at IS NOT NULL
+            ORDER BY last_github_version DESC, last_github_tiebreaker DESC
+            LIMIT 1
+            FOR UPDATE
+            """,
+            (event.issue_key,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        if (event.github_version, _event_tiebreaker(event)) > (
+            row["last_github_version"],
+            row["last_github_tiebreaker"],
+        ):
+            return None
+        return self._session_from_row(row)
+
+    @staticmethod
+    def _insert_event(
+        cursor: Cursor[dict[str, Any]],
+        *,
+        event: IssueEvent,
+        session_id: str,
+        context: MutationContext,
+        now: datetime,
+    ) -> None:
+        cursor.execute(
+            """
+            INSERT INTO issue_events(
+                event_id, issue_key, github_version, event_type,
+                actor_kind, occurred_at, sanitized_payload_ref,
+                session_id, run_id, lease_epoch, recorded_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                event.event_id,
+                event.issue_key,
+                event.github_version,
+                event.event_type,
+                event.actor_kind.value,
+                event.occurred_at,
+                event.sanitized_payload_ref,
+                session_id,
+                context.run_id,
+                context.lease_epoch,
+                now,
+            ),
+        )
+
     def _append_snapshot(
         self,
         cursor: Cursor[dict[str, Any]],
@@ -625,6 +695,19 @@ class PostgresIssueRepository:
             duplicate = self._existing_observation(cursor, event)
             if duplicate:
                 return duplicate
+            historical_session = self._closed_session_for_stale_event(cursor, event)
+            if historical_session is not None:
+                self._insert_event(
+                    cursor,
+                    event=event,
+                    session_id=historical_session.session_id,
+                    context=context,
+                    now=now,
+                )
+                return ObservationResult(
+                    EventDisposition.STALE,
+                    historical_session,
+                )
             session, _created = self._claim_session(
                 cursor,
                 canonical_issue_key=event.issue_key,
@@ -656,28 +739,12 @@ class PostgresIssueRepository:
                 last_github_version,
                 last_github_tiebreaker,
             )
-            cursor.execute(
-                """
-                INSERT INTO issue_events(
-                    event_id, issue_key, github_version, event_type,
-                    actor_kind, occurred_at, sanitized_payload_ref,
-                    session_id, run_id, lease_epoch, recorded_at
-                )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """,
-                (
-                    event.event_id,
-                    event.issue_key,
-                    event.github_version,
-                    event.event_type,
-                    event.actor_kind.value,
-                    event.occurred_at,
-                    event.sanitized_payload_ref,
-                    session.session_id,
-                    context.run_id,
-                    context.lease_epoch,
-                    now,
-                ),
+            self._insert_event(
+                cursor,
+                event=event,
+                session_id=session.session_id,
+                context=context,
+                now=now,
             )
             if not applied:
                 return ObservationResult(EventDisposition.STALE, session)

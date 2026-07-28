@@ -628,6 +628,56 @@ def test_closed_issue_reopens_with_a_new_lifecycle_session(
     assert repository.count_active_sessions(reopened.issue_key) == 1
 
 
+def test_delayed_stale_event_does_not_reopen_closed_lifecycle(
+    repository: PostgresIssueRepository,
+    now: datetime,
+) -> None:
+    context = _leader(repository, now)
+    first = repository.observe_event(
+        _event(event_id="delivery-current", github_version=20, occurred_at=now),
+        candidate_session_id="stable-issue-session",
+        risk_tier=RiskTier.HIGH,
+        context=context,
+        now=now,
+    ).session
+    for target in (
+        IssueState.TRIAGED,
+        IssueState.PLANNED,
+        IssueState.EXECUTING,
+        IssueState.REVIEWING,
+        IssueState.PR_OPEN,
+        IssueState.CHECKS_GREEN,
+        IssueState.MERGED,
+        IssueState.VERIFIED,
+        IssueState.CLOSED,
+    ):
+        first = repository.transition_session(
+            issue_key=first.issue_key,
+            expected_session_id=first.session_id,
+            target=target,
+            expected_context_version=first.context_version,
+            context=context,
+            now=now,
+        )
+
+    delayed = repository.observe_event(
+        _event(
+            event_id="delivery-delayed",
+            github_version=19,
+            occurred_at=now - timedelta(minutes=1),
+        ),
+        candidate_session_id="stable-issue-session",
+        risk_tier=RiskTier.LOW,
+        context=context,
+        now=now,
+    )
+
+    assert delayed.disposition is EventDisposition.STALE
+    assert delayed.session.session_id == first.session_id
+    assert repository.count_active_sessions(first.issue_key) == 0
+    assert repository.event_count(first.issue_key) == 2
+
+
 def test_stale_transition_cannot_cross_lifecycle_session_identity(
     repository: PostgresIssueRepository,
     now: datetime,

@@ -1,11 +1,12 @@
 from collections.abc import Mapping
 from datetime import UTC, datetime
+import threading
 from typing import Any
 
 import pytest
 
 from issue_control.coordination import LeaderTick
-from issue_control.repository import LeadershipDecision
+from issue_control.repository import LeadershipDecision, StaleFenceError
 from issue_control.runtime import IssueControlRuntime, NotLeaderError
 
 
@@ -116,3 +117,61 @@ def test_standby_runtime_cannot_ingest_or_reconcile() -> None:
             headers={"X-GitHub-Delivery": "delivery-1"},
             body=b"{}",
         )
+
+
+def test_authoritative_stale_fence_invalidates_cached_leadership() -> None:
+    class StaleIngestor(_Ingestor):
+        def ingest_webhook(self, **kwargs):
+            raise StaleFenceError("new leader already took over")
+
+    runtime = IssueControlRuntime(
+        leader=_Leader(is_leader=True),
+        reconciler=_Reconciler(),
+        ingestor=StaleIngestor(),
+        advisory=_Advisory(),
+        renewal_interval_seconds=10,
+        reconciliation_interval_seconds=300,
+        clock=lambda: NOW,
+    )
+    runtime.renew_leadership()
+
+    with pytest.raises(NotLeaderError, match="PostgreSQL rejected"):
+        runtime.ingest_webhook(
+            headers={"X-GitHub-Delivery": "delivery-stale"},
+            body=b"{}",
+        )
+    with pytest.raises(NotLeaderError, match="current PostgreSQL leader"):
+        runtime.reconcile_once()
+
+
+def test_stop_retains_thread_ownership_until_reconciliation_finishes() -> None:
+    started = threading.Event()
+    release = threading.Event()
+    stopped = threading.Event()
+
+    class BlockingReconciler(_Reconciler):
+        def run_once(self, **kwargs):
+            started.set()
+            assert release.wait(timeout=2)
+            return {"status": "done"}
+
+    runtime = IssueControlRuntime(
+        leader=_Leader(is_leader=True),
+        reconciler=BlockingReconciler(),
+        ingestor=_Ingestor(),
+        advisory=_Advisory(),
+        renewal_interval_seconds=10,
+        reconciliation_interval_seconds=300,
+        clock=lambda: NOW,
+    )
+    runtime.start()
+    assert started.wait(timeout=1)
+    stopper = threading.Thread(
+        target=lambda: (runtime.stop(), stopped.set()),
+    )
+    stopper.start()
+
+    assert not stopped.wait(timeout=0.05)
+    release.set()
+    assert stopped.wait(timeout=1)
+    stopper.join(timeout=1)
