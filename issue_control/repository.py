@@ -495,7 +495,7 @@ class PostgresIssueRepository:
                     risk_tier, lease_epoch, started_at, updated_at
                 )
                 VALUES (%s, %s, 'discovered', %s, %s, %s, %s, %s)
-                ON CONFLICT (issue_key) WHERE ended_at IS NULL DO NOTHING
+                ON CONFLICT DO NOTHING
                 RETURNING *
                 """,
                 (
@@ -974,8 +974,8 @@ class PostgresIssueRepository:
                            recorded_at, ledger_sequence AS sequence
                     FROM issue_events
                 ) AS trace
-                WHERE (%s IS NULL OR issue_key = %s)
-                  AND (%s IS NULL OR run_id = %s)
+                WHERE (%s::text IS NULL OR issue_key = %s::text)
+                  AND (%s::text IS NULL OR run_id = %s::text)
                 ORDER BY recorded_at DESC, sequence DESC
                 LIMIT %s
                 """,
