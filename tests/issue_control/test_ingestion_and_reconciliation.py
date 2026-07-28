@@ -18,7 +18,6 @@ from issue_control.repository import (
     ObservationResult,
 )
 from issue_control.reconciliation import ReconciliationService
-from issue_control.state_machine import StaleTransition
 
 
 NOW = datetime(2026, 7, 28, 12, 0, tzinfo=UTC)
@@ -70,27 +69,25 @@ class _Repository:
             disposition = EventDisposition.DUPLICATE
         return ObservationResult(disposition, session)
 
-    def transition_session(
+    def ensure_session_triaged(
         self,
         *,
         issue_key,
-        target,
-        expected_context_version,
         context,
         now,
     ):
         current = self.sessions[issue_key]
-        assert expected_context_version == current.context_version
+        if current.state is IssueState.TRIAGED:
+            return current
+        if current.state is not IssueState.DISCOVERED:
+            raise RuntimeError("initial triage rejected")
         transitioned = replace(
             current,
-            state=target,
+            state=IssueState.TRIAGED,
             context_version=current.context_version + 1,
         )
         self.sessions[issue_key] = transitioned
         return transitioned
-
-    def get_session(self, issue_key):
-        return self.sessions[issue_key]
 
     def record_reconciliation_started(self, repository, run_id, context, now):
         self.reconciliation_calls.append(("started", repository, run_id, context, now))
@@ -184,18 +181,17 @@ def test_signed_webhook_is_sanitized_observed_and_classified() -> None:
     assert store.payloads[0]["issue"]["title"] == "Authorization bypass"
 
 
-def test_concurrent_initial_triage_accepts_already_achieved_state() -> None:
-    class RacingRepository(_Repository):
-        def transition_session(self, **kwargs):
-            current = self.sessions[kwargs["issue_key"]]
-            self.sessions[kwargs["issue_key"]] = replace(
-                current,
-                state=IssueState.TRIAGED,
-                context_version=current.context_version + 1,
+def test_initial_triage_uses_current_repository_context() -> None:
+    class ReorderedRepository(_Repository):
+        def observe_event(self, event, **kwargs):
+            observation = super().observe_event(event, **kwargs)
+            self.sessions[event.issue_key] = replace(
+                observation.session,
+                context_version=observation.session.context_version + 1,
             )
-            raise StaleTransition("concurrent triage won the context CAS")
+            return observation
 
-    repository = RacingRepository()
+    repository = ReorderedRepository()
     ingestor = IssueEventIngestor(
         repository=repository,
         payload_store=_PayloadStore(),
@@ -207,7 +203,7 @@ def test_concurrent_initial_triage_accepts_already_achieved_state() -> None:
     result = ingestor.ingest_webhook(
         headers=_headers(body),
         body=body,
-        context=MutationContext(node_id="s3", lease_epoch=7, run_id="run-race"),
+        context=MutationContext(node_id="s3", lease_epoch=7, run_id="run-reordered"),
         now=NOW,
     )
 

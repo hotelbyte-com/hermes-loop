@@ -721,53 +721,110 @@ class PostgresIssueRepository:
             row = cursor.fetchone()
             if not row:
                 raise RepositoryError(f"no active session for {canonical_issue_key}")
-            session = self._session_from_row(row)
-            updated = apply_transition(
-                session,
+            return self._transition_locked_session(
+                cursor,
+                row=row,
                 target=target,
                 expected_context_version=expected_context_version,
-                lease_epoch=context.lease_epoch,
-            )
-            state_revision = row["state_revision"] + 1
-            transitioned_context_version = _durable_context_version(
-                state=updated.state,
-                state_revision=state_revision,
-                github_version=row["last_github_version"],
-                github_tiebreaker=row["last_github_tiebreaker"],
-                lease_epoch=context.lease_epoch,
-            )
-            ended_at = now if target is IssueState.CLOSED else None
-            cursor.execute(
-                """
-                UPDATE issue_sessions
-                SET state = %s,
-                    context_version = %s,
-                    state_revision = %s,
-                    updated_at = %s,
-                    ended_at = %s
-                WHERE session_id = %s
-                RETURNING *
-                """,
-                (
-                    updated.state.value,
-                    transitioned_context_version,
-                    state_revision,
-                    now,
-                    ended_at,
-                    updated.session_id,
-                ),
-            )
-            persisted = self._session_from_row(
-                _required_row(cursor.fetchone(), operation="transition session")
-            )
-            self._append_snapshot(
-                cursor,
-                session=persisted,
-                kind="state_transition",
                 context=context,
                 now=now,
             )
-            return persisted
+
+    def ensure_session_triaged(
+        self,
+        *,
+        issue_key: str,
+        context: MutationContext,
+        now: datetime,
+    ) -> IssueSession:
+        canonical_issue_key = _canonical_issue_key(issue_key)
+        with self._transaction() as (_connection, cursor):
+            self._assert_fence(cursor, context)
+            cursor.execute(
+                """
+                SELECT *
+                FROM issue_sessions
+                WHERE issue_key = %s AND ended_at IS NULL
+                FOR UPDATE
+                """,
+                (canonical_issue_key,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                raise RepositoryError(f"no active session for {canonical_issue_key}")
+            session = self._session_from_row(row)
+            if session.state is IssueState.TRIAGED:
+                return session
+            if session.state is not IssueState.DISCOVERED:
+                raise RepositoryConflict(
+                    f"initial triage cannot accept session state {session.state.value}"
+                )
+            return self._transition_locked_session(
+                cursor,
+                row=row,
+                target=IssueState.TRIAGED,
+                expected_context_version=session.context_version,
+                context=context,
+                now=now,
+            )
+
+    def _transition_locked_session(
+        self,
+        cursor: Cursor[dict[str, Any]],
+        *,
+        row: dict[str, Any],
+        target: IssueState,
+        expected_context_version: int,
+        context: MutationContext,
+        now: datetime,
+    ) -> IssueSession:
+        session = self._session_from_row(row)
+        updated = apply_transition(
+            session,
+            target=target,
+            expected_context_version=expected_context_version,
+            lease_epoch=context.lease_epoch,
+        )
+        state_revision = row["state_revision"] + 1
+        transitioned_context_version = _durable_context_version(
+            state=updated.state,
+            state_revision=state_revision,
+            github_version=row["last_github_version"],
+            github_tiebreaker=row["last_github_tiebreaker"],
+            lease_epoch=context.lease_epoch,
+        )
+        ended_at = now if target is IssueState.CLOSED else None
+        cursor.execute(
+            """
+            UPDATE issue_sessions
+            SET state = %s,
+                context_version = %s,
+                state_revision = %s,
+                updated_at = %s,
+                ended_at = %s
+            WHERE session_id = %s
+            RETURNING *
+            """,
+            (
+                updated.state.value,
+                transitioned_context_version,
+                state_revision,
+                now,
+                ended_at,
+                updated.session_id,
+            ),
+        )
+        persisted = self._session_from_row(
+            _required_row(cursor.fetchone(), operation="transition session")
+        )
+        self._append_snapshot(
+            cursor,
+            session=persisted,
+            kind="state_transition",
+            context=context,
+            now=now,
+        )
+        return persisted
 
     def get_session(self, issue_key: str) -> IssueSession:
         canonical_issue_key = _canonical_issue_key(issue_key)

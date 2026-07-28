@@ -23,6 +23,7 @@ from issue_control.repository import (
     EventDisposition,
     MutationContext,
     PostgresIssueRepository,
+    RepositoryConflict,
     StaleFenceError,
     _event_tiebreaker,
 )
@@ -397,9 +398,9 @@ def test_concurrent_duplicate_webhooks_converge_through_initial_triage(
         webhook_secret="webhook-secret",
         authorized_repositories=("hotelbyte-com/hotel-be",),
     )
-    body, headers = _signed_webhook(
+    headers, body = _webhook(
+        delivery_id="delivery-concurrent-webhook",
         updated_at="2026-07-28T12:00:00Z",
-        delivery="delivery-concurrent-webhook",
     )
 
     def ingest(_attempt: int):
@@ -418,6 +419,92 @@ def test_concurrent_duplicate_webhooks_converge_through_initial_triage(
         EventDisposition.DUPLICATE,
     }
     assert all(result.session.state is IssueState.TRIAGED for result in results)
+
+
+def test_initial_triage_is_idempotent_and_rejects_later_states(
+    repository: PostgresIssueRepository,
+    now: datetime,
+) -> None:
+    context = _leader(repository, now)
+    observed = repository.observe_event(
+        _event(event_id="delivery-idempotent-triage", github_version=1, occurred_at=now),
+        candidate_session_id="session-idempotent-triage",
+        risk_tier=RiskTier.LOW,
+        context=context,
+        now=now,
+    )
+
+    triaged = repository.ensure_session_triaged(
+        issue_key=observed.session.issue_key,
+        context=context,
+        now=now,
+    )
+    repeated = repository.ensure_session_triaged(
+        issue_key=observed.session.issue_key,
+        context=context,
+        now=now,
+    )
+    planned = repository.transition_session(
+        issue_key=observed.session.issue_key,
+        target=IssueState.PLANNED,
+        expected_context_version=triaged.context_version,
+        context=context,
+        now=now,
+    )
+
+    assert repeated == triaged
+    assert planned.state is IssueState.PLANNED
+    with pytest.raises(RepositoryConflict, match="initial triage"):
+        repository.ensure_session_triaged(
+            issue_key=observed.session.issue_key,
+            context=context,
+            now=now,
+        )
+
+
+def test_concurrent_reordered_webhooks_converge_through_initial_triage(
+    repository: PostgresIssueRepository,
+    now: datetime,
+) -> None:
+    context = _leader(repository, now)
+    ingestor = IssueEventIngestor(
+        repository=repository,
+        payload_store=_PayloadStore(),
+        webhook_secret="webhook-secret",
+        authorized_repositories=("hotelbyte-com/hotel-be",),
+    )
+    old_headers, old_body = _webhook(
+        delivery_id="delivery-concurrent-old",
+        updated_at="2026-07-28T11:59:00Z",
+    )
+    new_headers, new_body = _webhook(
+        delivery_id="delivery-concurrent-new",
+        updated_at="2026-07-28T12:00:00Z",
+    )
+
+    def ingest(request):
+        headers, body = request
+        return ingestor.ingest_webhook(
+            headers=headers,
+            body=body,
+            context=context,
+            now=now,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(
+            executor.map(
+                ingest,
+                ((old_headers, old_body), (new_headers, new_body)),
+            )
+        )
+
+    assert all(result.session.state is IssueState.TRIAGED for result in results)
+    assert (
+        repository.get_session(results[0].session.issue_key).state
+        is IssueState.TRIAGED
+    )
+    assert repository.event_count(results[0].session.issue_key) == 2
 
 
 def test_reconciliation_replay_converges_through_real_repository(

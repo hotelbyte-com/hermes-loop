@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
@@ -58,69 +59,77 @@ def build_application(
         now=now,
     )
 
-    redis_client = Redis.from_url(redis_url, decode_responses=True)
-    advisory = RedisAdvisoryCoordination(
-        client=cast(RedisClient, redis_client),
-        cluster_name=repository.cluster_name,
-        leader_ttl_seconds=config.takeover_after_seconds,
-    )
-    github = GitHubReadOnlyClient(
-        base_url=config.github.api_base_url,
-        token=secret_resolver.resolve(config.github.read_token_secret_ref),
-    )
-    github.assert_read_only_permissions()
-    s3_client = boto3.client(
-        "s3",
-        endpoint_url=config.payload_store.endpoint_url,
-    )
-    payload_store = S3SanitizedPayloadStore(
-        client=s3_client,
-        bucket=config.payload_store.bucket,
-        prefix=config.payload_store.prefix,
-    )
-    ingestor = IssueEventIngestor(
-        repository=repository,
-        payload_store=cast(PayloadStore, payload_store),
-        webhook_secret=secret_resolver.resolve(config.github.webhook_secret_ref),
-        authorized_repositories=config.authorized_repositories,
-    )
-    reconciliation = ReconciliationService(
-        repository=repository,
-        github=github,
-        ingestor=ingestor,
-        authorized_repositories=config.authorized_repositories,
-        interval_seconds=config.reconciliation_interval_seconds,
-    )
-    leader = LeaderCoordinator(
-        repository=repository,
-        advisory=advisory,
-        node_id=config.node_id,
-    )
-    runtime = IssueControlRuntime(
-        leader=leader,
-        reconciler=reconciliation,
-        ingestor=ingestor,
-        advisory=advisory,
-        renewal_interval_seconds=config.renewal_interval_seconds,
-        reconciliation_interval_seconds=config.reconciliation_interval_seconds,
-    )
-    status_service = InternalStatusService(
-        repository=repository,
-        github=github,
-        advisory=advisory,
-        node_id=config.node_id,
-        mode=config.mode,
-        authorized_repositories=config.authorized_repositories,
-    )
-    return create_control_plane_app(
-        status_service=status_service,
-        runtime=runtime,
-        close_callbacks=(
-            redis_client.close,
-            github.close,
-            s3_client.close,
-        ),
-    )
+    with ExitStack() as startup_cleanup:
+        redis_client = Redis.from_url(redis_url, decode_responses=True)
+        startup_cleanup.callback(redis_client.close)
+        advisory = RedisAdvisoryCoordination(
+            client=cast(RedisClient, redis_client),
+            cluster_name=repository.cluster_name,
+            leader_ttl_seconds=config.takeover_after_seconds,
+        )
+        github = GitHubReadOnlyClient(
+            base_url=config.github.api_base_url,
+            token=secret_resolver.resolve(config.github.read_token_secret_ref),
+        )
+        startup_cleanup.callback(github.close)
+        github.assert_read_only_permissions()
+        s3_client = boto3.client(
+            "s3",
+            endpoint_url=config.payload_store.endpoint_url,
+        )
+        startup_cleanup.callback(s3_client.close)
+        payload_store = S3SanitizedPayloadStore(
+            client=s3_client,
+            bucket=config.payload_store.bucket,
+            prefix=config.payload_store.prefix,
+        )
+        ingestor = IssueEventIngestor(
+            repository=repository,
+            payload_store=cast(PayloadStore, payload_store),
+            webhook_secret=secret_resolver.resolve(
+                config.github.webhook_secret_ref
+            ),
+            authorized_repositories=config.authorized_repositories,
+        )
+        reconciliation = ReconciliationService(
+            repository=repository,
+            github=github,
+            ingestor=ingestor,
+            authorized_repositories=config.authorized_repositories,
+            interval_seconds=config.reconciliation_interval_seconds,
+        )
+        leader = LeaderCoordinator(
+            repository=repository,
+            advisory=advisory,
+            node_id=config.node_id,
+        )
+        runtime = IssueControlRuntime(
+            leader=leader,
+            reconciler=reconciliation,
+            ingestor=ingestor,
+            advisory=advisory,
+            renewal_interval_seconds=config.renewal_interval_seconds,
+            reconciliation_interval_seconds=config.reconciliation_interval_seconds,
+        )
+        status_service = InternalStatusService(
+            repository=repository,
+            github=github,
+            advisory=advisory,
+            node_id=config.node_id,
+            mode=config.mode,
+            authorized_repositories=config.authorized_repositories,
+        )
+        app = create_control_plane_app(
+            status_service=status_service,
+            runtime=runtime,
+            close_callbacks=(
+                redis_client.close,
+                github.close,
+                s3_client.close,
+            ),
+        )
+        startup_cleanup.pop_all()
+        return app
 
 
 def main(argv: list[str] | None = None) -> None:

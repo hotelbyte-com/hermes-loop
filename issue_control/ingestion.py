@@ -24,7 +24,6 @@ from issue_control.repository import (
     MutationContext,
     ObservationResult,
 )
-from issue_control.state_machine import StaleTransition
 
 
 MAX_WEBHOOK_BYTES = 1_048_576
@@ -50,17 +49,13 @@ class EventRepository(Protocol):
         now: datetime,
     ) -> ObservationResult: ...
 
-    def transition_session(
+    def ensure_session_triaged(
         self,
         *,
         issue_key: str,
-        target: IssueState,
-        expected_context_version: int,
         context: MutationContext,
         now: datetime,
     ) -> IssueSession: ...
-
-    def get_session(self, issue_key: str) -> IssueSession: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -243,18 +238,11 @@ class IssueEventIngestor:
         )
         session = observation.session
         if session.state is IssueState.DISCOVERED:
-            try:
-                session = self._repository.transition_session(
-                    issue_key=stable_issue_key,
-                    target=IssueState.TRIAGED,
-                    expected_context_version=session.context_version,
-                    context=context,
-                    now=now,
-                )
-            except StaleTransition:
-                session = self._repository.get_session(stable_issue_key)
-                if session.state is not IssueState.TRIAGED:
-                    raise
+            session = self._repository.ensure_session_triaged(
+                issue_key=stable_issue_key,
+                context=context,
+                now=now,
+            )
         return IngestionResult(observation.disposition, session, event.event_id)
 
 
