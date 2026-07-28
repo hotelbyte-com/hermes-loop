@@ -12,6 +12,44 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  issue-control-postgres:
+    name: Issue Control Plane PostgreSQL contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: hermes
+          POSTGRES_PASSWORD: hermes-test-only
+          POSTGRES_DB: hermes_issue_control_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U hermes -d hermes_issue_control_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+
+      - name: Set up Python 3.11
+        run: uv python install 3.11
+
+      - name: Install Issue Control Plane test dependencies
+        uses: ./.github/actions/retry
+        with:
+          command: uv sync --locked --python 3.11 --extra dev --extra issue-control
+
+      - name: Run Issue Control Plane contracts
+        run: scripts/run_tests.sh --include-integration tests/issue_control/
+        env:
+          HERMES_ISSUE_CONTROL_TEST_POSTGRES_DSN: postgresql://hermes:hermes-test-only@127.0.0.1:5432/hermes_issue_control_test
+
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 30

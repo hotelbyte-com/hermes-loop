@@ -292,11 +292,17 @@ all = [
   "hermes-agent[web]",
   "hermes-agent[youtube]",
 ]
+issue-control = [
+  "boto3>=1.42.89,<2",
+  "psycopg[binary]>=3.3.4,<4",
+  "redis>=8.0.1,<9",
+]
 
 [project.scripts]
 hermes = "hermes_cli.main:main"
 hermes-agent = "run_agent:main"
 hermes-acp = "acp_adapter.entry:main"
+hermes-issue-control = "issue_control.cli:main"
 
 [tool.setuptools]
 py-modules = ["run_agent", "model_tools", "toolsets", "batch_runner", "trajectory_compressor", "toolset_distributions", "cli", "hermes_bootstrap", "hermes_constants", "hermes_state", "hermes_time", "hermes_logging", "utils", "mcp_serve"]
@@ -327,6 +333,7 @@ locales = ["locales/*.yaml"]
 [tool.setuptools.package-data]
 hermes_cli = ["web_dist/**/*", "tui_dist/**/*", "scripts/install.sh", "scripts/install.ps1"]
 gateway = ["assets/**/*"]
+issue_control = ["migrations/*.sql"]
 plugins = [
   "*/dashboard/manifest.json",
   "*/dashboard/dist/*",
@@ -343,7 +350,7 @@ plugins = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["agent", "agent.*", "tools", "tools.*", "hermes_cli", "hermes_cli.*", "gateway", "gateway.*", "tui_gateway", "tui_gateway.*", "cron", "cron.*", "acp_adapter", "plugins", "plugins.*", "providers", "providers.*"]
+include = ["agent", "agent.*", "tools", "tools.*", "hermes_cli", "hermes_cli.*", "gateway", "gateway.*", "tui_gateway", "tui_gateway.*", "cron", "cron.*", "acp_adapter", "plugins", "plugins.*", "providers", "providers.*", "issue_control", "issue_control.*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

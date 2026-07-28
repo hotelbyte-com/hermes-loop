@@ -30,6 +30,8 @@ from pathlib import Path
 
 import pytest
 
+from scripts.run_tests_parallel import _discover_files
+
 
 # Both tests share the same handoff file: the leaker writes here, the
 # verifier reads here. We park it in $TMPDIR with a unique-per-run name
@@ -55,12 +57,27 @@ def _pid_alive(pid: int) -> bool:
         # test is skipped on Windows so the path is unreachable.
         raise RuntimeError("_pid_alive POSIX-only")
     try:
-        os.kill(pid, 0)
+        os.kill(pid, 0)  # windows-footgun: ok — guarded POSIX-only probe
     except ProcessLookupError:
         return False
     except PermissionError:
         return True
     return True
+
+
+def test_default_discovery_excludes_dedicated_issue_control_suite(
+    tmp_path: Path,
+) -> None:
+    tests_root = tmp_path / "tests"
+    dedicated = tests_root / "issue_control"
+    dedicated.mkdir(parents=True)
+    issue_control_test = dedicated / "test_contract.py"
+    issue_control_test.write_text("def test_contract(): pass\n")
+    generic_test = tests_root / "test_generic.py"
+    generic_test.write_text("def test_generic(): pass\n")
+
+    assert _discover_files([tests_root]) == [generic_test]
+    assert _discover_files([dedicated]) == [issue_control_test]
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only probe")
