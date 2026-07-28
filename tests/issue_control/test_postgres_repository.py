@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import os
+import threading
 from typing import Any, NoReturn
 from uuid import uuid4
 
@@ -674,6 +675,82 @@ def test_delayed_stale_event_does_not_reopen_closed_lifecycle(
 
     assert delayed.disposition is EventDisposition.STALE
     assert delayed.session.session_id == first.session_id
+    assert repository.count_active_sessions(first.issue_key) == 0
+    assert repository.event_count(first.issue_key) == 2
+
+
+def test_concurrent_stale_duplicate_replay_converges_on_closed_lifecycle(
+    repository: PostgresIssueRepository,
+    now: datetime,
+    monkeypatch,
+) -> None:
+    context = _leader(repository, now)
+    first = repository.observe_event(
+        _event(event_id="delivery-current", github_version=20, occurred_at=now),
+        candidate_session_id="stable-issue-session",
+        risk_tier=RiskTier.HIGH,
+        context=context,
+        now=now,
+    ).session
+    for target in (
+        IssueState.TRIAGED,
+        IssueState.PLANNED,
+        IssueState.EXECUTING,
+        IssueState.REVIEWING,
+        IssueState.PR_OPEN,
+        IssueState.CHECKS_GREEN,
+        IssueState.MERGED,
+        IssueState.VERIFIED,
+        IssueState.CLOSED,
+    ):
+        first = repository.transition_session(
+            issue_key=first.issue_key,
+            expected_session_id=first.session_id,
+            target=target,
+            expected_context_version=first.context_version,
+            context=context,
+            now=now,
+        )
+
+    stale = _event(
+        event_id="delivery-concurrent-delayed",
+        github_version=19,
+        occurred_at=now - timedelta(minutes=1),
+    )
+    original_existing_observation = repository._existing_observation
+    initial_lookups = threading.Barrier(2)
+    thread_state = threading.local()
+
+    def synchronize_initial_lookup(cursor, event):
+        result = original_existing_observation(cursor, event)
+        if result is None and not getattr(thread_state, "synchronized", False):
+            thread_state.synchronized = True
+            initial_lookups.wait(timeout=2)
+        return result
+
+    monkeypatch.setattr(
+        repository,
+        "_existing_observation",
+        synchronize_initial_lookup,
+    )
+
+    def observe(_attempt: int):
+        return repository.observe_event(
+            stale,
+            candidate_session_id="stable-issue-session",
+            risk_tier=RiskTier.LOW,
+            context=context,
+            now=now,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(observe, range(2)))
+
+    assert {result.disposition for result in results} == {
+        EventDisposition.STALE,
+        EventDisposition.DUPLICATE,
+    }
+    assert all(result.session.session_id == first.session_id for result in results)
     assert repository.count_active_sessions(first.issue_key) == 0
     assert repository.event_count(first.issue_key) == 2
 

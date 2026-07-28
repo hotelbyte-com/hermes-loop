@@ -15,7 +15,17 @@ class ConfigError(ValueError):
 
 
 _SECRET_REFERENCE_RE = re.compile(r"^secret://env/[A-Za-z0-9_]+$")
-_CREDENTIAL_QUERY_FRAGMENTS = ("password", "secret", "token", "api_key", "apikey")
+_CREDENTIAL_QUERY_FRAGMENTS = (
+    "password",
+    "secret",
+    "token",
+    "api_key",
+    "apikey",
+    "access_key",
+    "credential",
+    "signature",
+    "auth",
+)
 
 
 def _strict_keys(
@@ -27,6 +37,42 @@ def _strict_keys(
     unknown = sorted(set(raw) - allowed)
     if unknown:
         raise ConfigError(f"unknown {scope} configuration keys: {', '.join(unknown)}")
+
+
+def _validate_secret_reference(field: str, value: str) -> None:
+    if not _SECRET_REFERENCE_RE.fullmatch(value):
+        raise ConfigError(f"{field} must use secret://env/NAME")
+
+
+def _validate_credential_free_url(
+    field: str,
+    value: str,
+    *,
+    allowed_schemes: set[str],
+    allow_username: bool = False,
+    allow_query: bool = False,
+) -> None:
+    try:
+        parsed = urlsplit(value)
+        _parsed_port = parsed.port
+    except ValueError as exc:
+        raise ConfigError(f"{field} must be a valid credential-free URL") from exc
+    if (
+        parsed.scheme.casefold() not in allowed_schemes
+        or not parsed.hostname
+        or parsed.fragment
+    ):
+        raise ConfigError(f"{field} must be a supported credential-free URL")
+    if parsed.password is not None or (
+        not allow_username and parsed.username is not None
+    ):
+        raise ConfigError(f"{field} must not contain credentials in config.yaml")
+    if parsed.query and not allow_query:
+        raise ConfigError(f"{field} must not contain query parameters")
+    for key, _value in parse_qsl(parsed.query, keep_blank_values=True):
+        normalized = key.casefold().replace("-", "_")
+        if any(fragment in normalized for fragment in _CREDENTIAL_QUERY_FRAGMENTS):
+            raise ConfigError(f"{field} must not contain credentials in config.yaml")
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,12 +105,19 @@ class GitHubReadConfig:
             )
         except KeyError as exc:
             raise ConfigError(f"missing github configuration: {exc.args[0]}") from exc
-        if not config.api_base_url.startswith("https://"):
-            raise ConfigError("github.api_base_url must use HTTPS")
-        if not config.read_token_secret_ref.startswith("secret://env/"):
-            raise ConfigError("github.read_token_secret_ref must use secret://env/NAME")
-        if not config.webhook_secret_ref.startswith("secret://env/"):
-            raise ConfigError("github.webhook_secret_ref must use secret://env/NAME")
+        _validate_credential_free_url(
+            "github.api_base_url",
+            config.api_base_url,
+            allowed_schemes={"https"},
+        )
+        _validate_secret_reference(
+            "github.read_token_secret_ref",
+            config.read_token_secret_ref,
+        )
+        _validate_secret_reference(
+            "github.webhook_secret_ref",
+            config.webhook_secret_ref,
+        )
         return config
 
 
@@ -97,6 +150,12 @@ class S3PayloadConfig:
             ) from exc
         if not config.bucket:
             raise ConfigError("payload_store.bucket is required")
+        if config.endpoint_url is not None:
+            _validate_credential_free_url(
+                "payload_store.endpoint_url",
+                config.endpoint_url,
+                allowed_schemes={"http", "https"},
+            )
         return config
 
 
@@ -199,31 +258,20 @@ class IssueControlConfig:
 
 def _validate_service_location(field: str, value: str) -> None:
     if value.startswith("secret://"):
-        if not _SECRET_REFERENCE_RE.fullmatch(value):
-            raise ConfigError(f"{field} secret references must use secret://env/NAME")
+        _validate_secret_reference(field, value)
         return
-    try:
-        parsed = urlsplit(value)
-        _parsed_port = parsed.port
-    except ValueError as exc:
-        raise ConfigError(f"{field} must be a valid credential-free service URL") from exc
     allowed_schemes = (
         {"postgres", "postgresql"}
         if field == "postgres_dsn"
         else {"redis", "rediss"}
     )
-    if (
-        parsed.scheme.casefold() not in allowed_schemes
-        or not parsed.hostname
-        or parsed.fragment
-    ):
-        raise ConfigError(f"{field} must be a supported credential-free service URL")
-    if parsed.password is not None:
-        raise ConfigError(f"{field} must not contain credentials in config.yaml")
-    for key, _value in parse_qsl(parsed.query, keep_blank_values=True):
-        normalized = key.casefold().replace("-", "_")
-        if any(fragment in normalized for fragment in _CREDENTIAL_QUERY_FRAGMENTS):
-            raise ConfigError(f"{field} must not contain credentials in config.yaml")
+    _validate_credential_free_url(
+        field,
+        value,
+        allowed_schemes=allowed_schemes,
+        allow_username=True,
+        allow_query=True,
+    )
 
 
 def _canonical_repository(repository: str) -> str:

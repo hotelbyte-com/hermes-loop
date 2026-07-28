@@ -102,6 +102,55 @@ def test_service_locations_reject_credentials_and_unsupported_dsns(
 @pytest.mark.parametrize(
     ("path", "value"),
     [
+        (("github", "api_base_url"), "https://user:password@api.github.com"),
+        (("github", "api_base_url"), "https://api.github.com?token=secret"),
+        (
+            ("payload_store", "endpoint_url"),
+            "https://access-key@minio.internal",
+        ),
+        (
+            ("payload_store", "endpoint_url"),
+            "https://minio.internal?X-Amz-Credential=secret",
+        ),
+    ],
+)
+def test_endpoint_urls_reject_userinfo_and_query_credentials(
+    path: tuple[str, ...],
+    value: str,
+) -> None:
+    raw = _valid_config()
+    target = raw
+    for part in path[:-1]:
+        target = target[part]
+    target[path[-1]] = value
+
+    with pytest.raises(ConfigError, match="credential|query"):
+        IssueControlConfig.from_mapping(raw)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("read_token_secret_ref", "secret://env/"),
+        ("read_token_secret_ref", "secret://env/TOKEN/extra"),
+        ("webhook_secret_ref", "secret://env/"),
+        ("webhook_secret_ref", "secret://env/TOKEN/extra"),
+    ],
+)
+def test_github_secret_references_require_exact_environment_reference(
+    field: str,
+    value: str,
+) -> None:
+    raw = _valid_config()
+    raw["github"][field] = value
+
+    with pytest.raises(ConfigError, match="secret://env/NAME"):
+        IssueControlConfig.from_mapping(raw)
+
+
+@pytest.mark.parametrize(
+    ("path", "value"),
+    [
         (("github", "token"), "ghp_write"),
         (("github", "write_token"), "github_pat_write"),
         (("github", "private_key"), "-----BEGIN PRIVATE KEY-----"),

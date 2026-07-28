@@ -697,6 +697,9 @@ class PostgresIssueRepository:
                 return duplicate
             historical_session = self._closed_session_for_stale_event(cursor, event)
             if historical_session is not None:
+                duplicate = self._existing_observation(cursor, event)
+                if duplicate:
+                    return duplicate
                 self._insert_event(
                     cursor,
                     event=event,
