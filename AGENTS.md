@@ -130,6 +130,7 @@ undiscoverable document without linking it here or from a nested entrypoint.
 | Optional MCP catalog | [`optional-mcps/AGENTS.md`](optional-mcps/AGENTS.md) |
 | Cron scheduler | [`cron/AGENTS.md`](cron/AGENTS.md) |
 | Loop control-plane product | [`loop/AGENTS.md`](loop/AGENTS.md), then `server/` or `web/` guidance |
+| Read-only GitHub issue observer | [`issue_control/AGENTS.md`](issue_control/AGENTS.md) |
 | Tests and fixtures | [`tests/AGENTS.md`](tests/AGENTS.md) |
 | Install/release/CI scripts and containers | [`scripts/AGENTS.md`](scripts/AGENTS.md), [`docker/AGENTS.md`](docker/AGENTS.md) |
 | ACP integration | [`acp_adapter/AGENTS.md`](acp_adapter/AGENTS.md) |
@@ -157,3 +158,9 @@ Follow the Conventional Commit style documented in `CONTRIBUTING.md` (for
 example `fix(gateway): ...` or `docs(agent): ...`). Commit and push completed,
 reversible work on a feature branch. Never rewrite or force-push shared history
 unless the task explicitly authorizes it.
+
+## Maintaining this file
+
+Keep this root file limited to knowledge useful in almost every agent session.
+Point to authoritative code, commands, and the closest local guidance; rewrite
+or prune existing entries instead of appending duplicate policy.

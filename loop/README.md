@@ -3,6 +3,9 @@
 > Central control plane for `loop.hotelbyte.com`.
 > 护城河 = **可控投递边界 + 投递诊断**（MessageDelivery 全审计）。普通消息不群发、`@all`/`@online` 受控、私有上下文不扩散，且**每一次投递命中/排除都可追溯**。
 
+> 👥 **非研发同学请直接看 [《内测快速上手（一页纸）》](./quickstart.md)** —— 10 分钟从零跑起来，无需任何前置知识。
+> 本文件（README.md）是面向**研发**的架构 / 投递语义 / runtime 桥完整文档。
+
 这是 `hotelbyte-com/hermes-loop` 仓内的 **Loop 产品**目录。仓内其余 Python 代码（`agent/` 等）是 hermes-agent 上游，按 D-021 视为**可选 runtime 之一**，不在本产品核心路径上。
 
 ## 三层核心抽象（D-020）
