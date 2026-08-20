@@ -20,7 +20,7 @@ set -e
 # A downloaded installer has no source tree here and uses the installed module.
 READINESS_SOURCE_ROOT=""
 case "${BASH_SOURCE[0]:-}" in
-    */scripts/install.sh)
+    *scripts/install.sh)
         _installer_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
         if [ -d "$_installer_root/hermes_cli" ]; then
             READINESS_SOURCE_ROOT="$_installer_root"

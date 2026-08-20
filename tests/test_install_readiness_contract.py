@@ -54,7 +54,12 @@ def _fake_install_tree(tmp_path, receipt, exit_code=0, expected_home=None):
     hermes_bin = install_dir / "venv" / "bin" / "hermes"
     python_bin = install_dir / "venv" / "bin" / "python"
     hermes_bin.parent.mkdir(parents=True)
-    python_bin.symlink_to(sys.executable)
+    # A symlink to sys.executable loses the venv context when resolved from a
+    # different directory.  Use a thin wrapper script so the real interpreter
+    # keeps its own site-packages (yaml, hermes_cli, etc.).
+    python_bin.write_text(
+        f"#!/bin/sh\nexec '{sys.executable}' \"$@\"\n", encoding="utf-8"
+    )
     home_guard = ""
     if expected_home is not None:
         home_guard = f"[ \"${{HERMES_HOME:-}}\" = '{expected_home}' ] || exit 88\n"
@@ -65,6 +70,7 @@ def _fake_install_tree(tmp_path, receipt, exit_code=0, expected_home=None):
         + f"exit {exit_code}\n",
         encoding="utf-8",
     )
+    python_bin.chmod(0o755)
     hermes_bin.chmod(0o755)
     return install_dir
 
