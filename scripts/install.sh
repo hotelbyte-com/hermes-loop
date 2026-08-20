@@ -15,6 +15,20 @@
 
 set -e
 
+# When run from a checkout, let the stage-only contract tests and local repair
+# runs use the same readiness validator before the package has been installed.
+# A downloaded installer has no source tree here and uses the installed module.
+READINESS_SOURCE_ROOT=""
+case "${BASH_SOURCE[0]:-}" in
+    */scripts/install.sh)
+        _installer_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+        if [ -d "$_installer_root/hermes_cli" ]; then
+            READINESS_SOURCE_ROOT="$_installer_root"
+        fi
+        unset _installer_root
+        ;;
+esac
+
 # Guard against environment leakage when the installer is launched from another
 # Python-driven tool session (e.g. Hermes terminal tool). A pre-set PYTHONPATH
 # can force pip/entrypoints to import a different checkout than the one being
@@ -202,6 +216,11 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Make the selected profile part of every child process.  This must happen
+# after argument parsing so an explicit --hermes-home wins over an inherited
+# profile even when setup/readiness/launch run in separate stages.
+export HERMES_HOME
+
 # ============================================================================
 # Helper functions
 # ============================================================================
@@ -268,7 +287,7 @@ emit_manifest() {
     if [ "$INCLUDE_DESKTOP" = true ]; then
         desktop_stage='{"name":"desktop","title":"Build desktop app","category":"runtime","needs_user_input":false},'
     fi
-    printf '%s' '{"protocol_version":1,"stages":[{"name":"prerequisites","title":"System prerequisites","category":"runtime","needs_user_input":false},{"name":"repository","title":"Download Hermes Agent","category":"runtime","needs_user_input":false},{"name":"venv","title":"Create Python virtual environment","category":"runtime","needs_user_input":false},{"name":"python-deps","title":"Install Python dependencies","category":"runtime","needs_user_input":false},{"name":"node-deps","title":"Install browser-tool dependencies","category":"runtime","needs_user_input":false},{"name":"path","title":"Install hermes command","category":"runtime","needs_user_input":false},{"name":"config","title":"Prepare config and skills","category":"configuration","needs_user_input":false},{"name":"setup","title":"Configure API keys and settings","category":"configuration","needs_user_input":true},{"name":"gateway","title":"Configure gateway service","category":"configuration","needs_user_input":true},'"$desktop_stage"'{"name":"complete","title":"Finish install","category":"runtime","needs_user_input":false}]}'
+    printf '%s' '{"protocol_version":1,"stages":[{"name":"prerequisites","title":"System prerequisites","category":"runtime","needs_user_input":false},{"name":"repository","title":"Download Hermes Agent","category":"runtime","needs_user_input":false},{"name":"venv","title":"Create Python virtual environment","category":"runtime","needs_user_input":false},{"name":"python-deps","title":"Install Python dependencies","category":"runtime","needs_user_input":false},{"name":"node-deps","title":"Install browser-tool dependencies","category":"runtime","needs_user_input":false},{"name":"path","title":"Install hermes command","category":"runtime","needs_user_input":false},{"name":"config","title":"Prepare config and skills","category":"configuration","needs_user_input":false},{"name":"setup","title":"Configure API keys and settings","category":"configuration","needs_user_input":true},{"name":"gateway","title":"Configure gateway service","category":"configuration","needs_user_input":true},{"name":"readiness","title":"Verify Hermes readiness","category":"configuration","needs_user_input":false},'"$desktop_stage"'{"name":"complete","title":"Finish install","category":"runtime","needs_user_input":false}]}'
     printf '\n'
 }
 
@@ -550,12 +569,18 @@ install_uv() {
     fi
 }
 
+python_version_supported() {
+    local python_exe="$1"
+    [ -x "$python_exe" ] || return 1
+    "$python_exe" -c 'import sys; raise SystemExit(0 if (3, 11) <= sys.version_info[:2] < (3, 14) else 1)' >/dev/null 2>&1
+}
+
 check_python() {
     if [ "$DISTRO" = "termux" ]; then
         log_info "Checking Termux Python..."
         if command -v python >/dev/null 2>&1; then
             PYTHON_PATH="$(command -v python)"
-            if "$PYTHON_PATH" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' 2>/dev/null; then
+            if python_version_supported "$PYTHON_PATH"; then
                 PYTHON_FOUND_VERSION="$("$PYTHON_PATH" --version 2>/dev/null)"
                 log_success "Python found: $PYTHON_FOUND_VERSION"
                 return 0
@@ -566,8 +591,13 @@ check_python() {
         pkg install -y python >/dev/null
         PYTHON_PATH="$(command -v python)"
         PYTHON_FOUND_VERSION="$("$PYTHON_PATH" --version 2>/dev/null)"
-        log_success "Python installed: $PYTHON_FOUND_VERSION"
-        return 0
+        if python_version_supported "$PYTHON_PATH"; then
+            log_success "Python installed: $PYTHON_FOUND_VERSION"
+            return 0
+        fi
+        log_error "Termux Python $PYTHON_FOUND_VERSION is outside the supported range (>=3.11,<3.14)"
+        log_info "Install Python 3.11, 3.12, or 3.13, then re-run this script"
+        return 1
     fi
 
     log_info "Checking Python $PYTHON_VERSION..."
@@ -1244,21 +1274,40 @@ setup_venv() {
     if [ "$DISTRO" = "termux" ]; then
         log_info "Creating virtual environment with Termux Python..."
 
+        if python_version_supported "$INSTALL_DIR/venv/bin/python"; then
+            export UV_PYTHON="$INSTALL_DIR/venv/bin/python"
+            log_info "Virtual environment already usable, keeping it"
+            return 0
+        fi
+
         if [ -d "venv" ]; then
-            log_info "Virtual environment already exists, recreating..."
-            rm -rf venv
+            local broken_venv="venv.broken.$(date +%s).$$"
+            log_warn "Existing virtual environment is not usable; preserving it at $broken_venv"
+            mv "venv" "$broken_venv"
         fi
 
         "$PYTHON_PATH" -m venv venv
+        if ! python_version_supported "$INSTALL_DIR/venv/bin/python"; then
+            log_error "Created virtual environment uses unsupported Python (required >=3.11,<3.14)"
+            log_info "Recover with: install Python 3.11, 3.12, or 3.13, then re-run the installer"
+            return 1
+        fi
         log_success "Virtual environment ready ($(./venv/bin/python --version 2>/dev/null))"
         return 0
     fi
 
     log_info "Creating virtual environment with Python $PYTHON_VERSION..."
 
+    if python_version_supported "$INSTALL_DIR/venv/bin/python"; then
+        export UV_PYTHON="$INSTALL_DIR/venv/bin/python"
+        log_info "Virtual environment already usable, keeping it"
+        return 0
+    fi
+
     if [ -d "venv" ]; then
-        log_info "Virtual environment already exists, recreating..."
-        rm -rf venv
+        local broken_venv="venv.broken.$(date +%s).$$"
+        log_warn "Existing virtual environment is not usable; preserving it at $broken_venv"
+        mv "venv" "$broken_venv"
     fi
 
     # uv creates the venv and pins the Python version in one step
@@ -1275,6 +1324,12 @@ setup_venv() {
         export UV_PYTHON="$INSTALL_DIR/venv/bin/python"
     fi
 
+    if ! python_version_supported "$INSTALL_DIR/venv/bin/python"; then
+        log_error "Created virtual environment uses unsupported Python (required >=3.11,<3.14)"
+        log_info "Recover with: cd $INSTALL_DIR && uv venv venv --python 3.11"
+        return 1
+    fi
+
     log_success "Virtual environment ready (Python $PYTHON_VERSION)"
 }
 
@@ -1287,7 +1342,12 @@ install_deps() {
     # python-deps invocation. Re-deriving it here covers that path. Without it,
     # an inherited UV_PYTHON=3.14 makes the uv sync/pip tiers below recreate the
     # venv at 3.14 and fail the maturin source build (no cp314 wheels yet).
-    if [ "$DISTRO" != "termux" ] && [ -x "$INSTALL_DIR/venv/bin/python" ]; then
+    if [ "$USE_VENV" = true ]; then
+        if ! python_version_supported "$INSTALL_DIR/venv/bin/python"; then
+            log_error "Existing virtual environment is outside the supported range (>=3.11,<3.14)"
+            log_info "Recover with: cd $INSTALL_DIR && uv venv venv --python 3.11"
+            return 1
+        fi
         export UV_PYTHON="$INSTALL_DIR/venv/bin/python"
     fi
 
@@ -1421,7 +1481,9 @@ install_deps() {
             log_success "All dependencies installed"
             return 0
         fi
-        log_warn "uv.lock sync failed (see uv output above), falling back to PyPI resolve..."
+        log_error "uv.lock sync failed; refusing unverified dependency resolution"
+        log_info "Recover with: cd $INSTALL_DIR && uv sync --extra all --locked"
+        return 1
     else
         log_info "uv.lock not found — falling back to PyPI resolve (no hash verification)"
     fi
@@ -1996,7 +2058,7 @@ install_node_deps() {
 }
 
 run_setup_wizard() {
-    if [ "$RUN_SETUP" = false ]; then
+    if [ "$RUN_SETUP" = false ] || [ "$NON_INTERACTIVE" = true ]; then
         log_info "Skipping setup wizard (--skip-setup)"
         return 0
     fi
@@ -2023,13 +2085,89 @@ run_setup_wizard() {
     # Run hermes setup using the venv Python directly (no activation needed).
     # Redirect stdin from /dev/tty so interactive prompts work when piped from curl.
     if [ "$USE_VENV" = true ]; then
-        "$INSTALL_DIR/venv/bin/python" -m hermes_cli.main setup < /dev/tty
+        HERMES_HOME="$HERMES_HOME" "$INSTALL_DIR/venv/bin/python" -m hermes_cli.main setup < /dev/tty
     else
-        python -m hermes_cli.main setup < /dev/tty
+        HERMES_HOME="$HERMES_HOME" python -m hermes_cli.main setup < /dev/tty
     fi
 }
 
+readiness_command() {
+    if [ "$USE_VENV" = true ]; then
+        echo "$INSTALL_DIR/venv/bin/hermes"
+    else
+        echo "$(get_hermes_command_path)"
+    fi
+}
+
+run_readiness() {
+    local emit_receipt="${1:-true}"
+    local hermes_cmd readiness_python readiness_code readiness_status readiness_next_command receipt_file
+    hermes_cmd="$(readiness_command)"
+    if [ "$USE_VENV" = true ]; then
+        readiness_python="$INSTALL_DIR/venv/bin/python"
+    else
+        readiness_python="$(command -v python)"
+    fi
+    if [ "$hermes_cmd" = "hermes" ]; then
+        hermes_cmd="$(command -v hermes || true)"
+    fi
+    if [ -z "$hermes_cmd" ] || [ ! -x "$hermes_cmd" ] || [ ! -x "$readiness_python" ]; then
+        log_error "Hermes executable is missing; installation is not ready"
+        log_info "Recover with: cd $INSTALL_DIR && uv pip install -e '.[all]'"
+        return 1
+    fi
+
+    receipt_file="$(mktemp 2>/dev/null || echo "/tmp/hermes-readiness.$$")"
+    set +e
+    HERMES_HOME="$HERMES_HOME" "$hermes_cmd" doctor --ready --json >"$receipt_file" 2>"$receipt_file.stderr"
+    readiness_code=$?
+    set -e
+    local receipt_validation=""
+    if [ -n "$READINESS_SOURCE_ROOT" ]; then
+        if ! receipt_validation="$(HERMES_HOME="$HERMES_HOME" PYTHONPATH="$READINESS_SOURCE_ROOT" "$readiness_python" -m hermes_cli.readiness --validate --exit-code "$readiness_code" < "$receipt_file" 2>/dev/null)"; then
+            receipt_validation=""
+        fi
+    else
+        if ! receipt_validation="$(HERMES_HOME="$HERMES_HOME" "$readiness_python" -m hermes_cli.readiness --validate --exit-code "$readiness_code" < "$receipt_file" 2>/dev/null)"; then
+            receipt_validation=""
+        fi
+    fi
+    if [ -z "$receipt_validation" ]; then
+        log_error "Hermes readiness returned an invalid or contradictory receipt"
+        log_info "Next command: cd $INSTALL_DIR && hermes doctor"
+        rm -f "$receipt_file" "$receipt_file.stderr"
+        return 1
+    fi
+    readiness_status="$(printf '%s\n' "$receipt_validation" | sed -n '1p')"
+    readiness_next_command="$(printf '%s\n' "$receipt_validation" | sed -n '2p')"
+    if [ "$emit_receipt" = true ]; then
+        cat "$receipt_file"
+    fi
+    rm -f "$receipt_file" "$receipt_file.stderr"
+
+    case "$readiness_status" in
+        ready)
+            log_success "Hermes readiness: ready"
+            return 0
+            ;;
+        incomplete_setup)
+            log_warn "Hermes readiness: incomplete_setup"
+            log_info "Next command: ${readiness_next_command:-hermes setup}"
+            return 2
+            ;;
+        *)
+            log_error "Hermes readiness: failure (exit $readiness_code)"
+            log_info "Next command: ${readiness_next_command:-cd $INSTALL_DIR && hermes doctor}"
+            return 1
+            ;;
+    esac
+}
+
 maybe_start_gateway() {
+    if [ "$RUN_SETUP" = false ] || [ "$NON_INTERACTIVE" = true ]; then
+        log_info "Skipping gateway startup (install-only mode)"
+        return 0
+    fi
     # Check if any messaging platform tokens were configured
     ENV_FILE="$HERMES_HOME/.env"
     if [ ! -f "$ENV_FILE" ]; then
@@ -2096,9 +2234,9 @@ maybe_start_gateway() {
 
         if [ "$DISTRO" != "termux" ] && command -v systemctl &> /dev/null; then
             log_info "Installing systemd service..."
-            if $HERMES_CMD gateway install 2>/dev/null; then
+            if HERMES_HOME="$HERMES_HOME" $HERMES_CMD gateway install 2>/dev/null; then
                 log_success "Gateway service installed"
-                if $HERMES_CMD gateway start 2>/dev/null; then
+                if HERMES_HOME="$HERMES_HOME" $HERMES_CMD gateway start 2>/dev/null; then
                     log_success "Gateway started! Your bot is now online."
                 else
                     log_warn "Service installed but failed to start. Try: hermes gateway start"
@@ -2112,9 +2250,9 @@ maybe_start_gateway() {
             else
                 log_info "systemd not available — starting gateway in background..."
             fi
-            nohup $HERMES_CMD gateway > "$HERMES_HOME/logs/gateway.log" 2>&1 &
+            HERMES_HOME="$HERMES_HOME" nohup $HERMES_CMD gateway > "$HERMES_HOME/logs/gateway.log" 2>&1 &
             GATEWAY_PID=$!
-            log_success "Gateway started (PID $GATEWAY_PID). Logs: ~/.hermes/logs/gateway.log"
+            log_success "Gateway started (PID $GATEWAY_PID). Logs: $HERMES_HOME/logs/gateway.log"
             log_info "To stop: kill $GATEWAY_PID"
             log_info "To restart later: hermes gateway"
             if [ "$DISTRO" = "termux" ]; then
@@ -2158,7 +2296,10 @@ print_success() {
 
     echo -e "${CYAN}─────────────────────────────────────────────────────────${NC}"
     echo ""
-    if [ "$DISTRO" = "termux" ]; then
+    if [ "$RUN_SETUP" = true ] && [ "$NON_INTERACTIVE" = false ] && (: </dev/tty) 2>/dev/null; then
+        echo -e "${GREEN}Setup is ready; Hermes will start directly from the installed executable.${NC}"
+        echo ""
+    elif [ "$DISTRO" = "termux" ]; then
         echo -e "${YELLOW}⚡ 'hermes' was linked into $(get_command_link_display_dir), which is already on PATH in Termux.${NC}"
         echo ""
     elif [ "$ROOT_FHS_LAYOUT" = true ]; then
@@ -2733,6 +2874,16 @@ run_stage_body() {
             require_install_dir
             maybe_start_gateway
             ;;
+        readiness)
+            detect_os
+            resolve_install_layout
+            require_install_dir
+            if [ "$JSON_OUTPUT" = true ]; then
+                run_readiness false
+            else
+                run_readiness
+            fi
+            ;;
         desktop)
             detect_os
             resolve_install_layout
@@ -2773,7 +2924,10 @@ run_stage_protocol() {
     fi
 
     if [ "$NON_INTERACTIVE" = true ] && stage_needs_user_input "$stage"; then
-        log_info "Skipping $stage (non-interactive bootstrap)"
+        log_info "Skipping $stage (install-only mode; non-interactive bootstrap)"
+        if [ "$stage" = setup ]; then
+            log_info "Next command: hermes setup"
+        fi
         if [ "$JSON_OUTPUT" = true ]; then
             emit_stage_json "$stage" true true
         fi
@@ -2826,11 +2980,12 @@ main() {
     run_setup_wizard
     maybe_start_gateway
 
-    if [ "$INCLUDE_DESKTOP" = true ]; then
-        install_desktop
+    if run_readiness; then
+        :
+    else
+        local readiness_exit=$?
+        return "$readiness_exit"
     fi
-
-    print_success
 
     # Code-scoped stamp: write next to the install tree, not into $HERMES_HOME.
     # $HERMES_HOME is a shared data dir (it can be bind-mounted into a Docker
@@ -2838,6 +2993,18 @@ main() {
     # stamp and wrongly blocks 'hermes update' on this host install.
     # See detect_install_method().
     echo "git" > "$INSTALL_DIR/.install_method"
+
+    if [ "$INCLUDE_DESKTOP" = true ]; then
+        install_desktop
+    fi
+
+    print_success
+
+    if [ "$RUN_SETUP" = true ] && [ "$NON_INTERACTIVE" = false ] && (: </dev/tty) 2>/dev/null; then
+        log_success "Launching Hermes directly from the installed executable"
+        HERMES_HOME="$HERMES_HOME" exec "$(readiness_command)" < /dev/tty
+    fi
+
 }
 
 if [ "$MANIFEST_MODE" = true ]; then

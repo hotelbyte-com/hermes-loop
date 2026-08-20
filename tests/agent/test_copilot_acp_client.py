@@ -207,3 +207,38 @@ def test_run_prompt_passes_home_when_parent_env_is_clean(monkeypatch, tmp_path):
 
     assert "env" in captured["kwargs"]
     assert captured["kwargs"]["env"]["HOME"]
+
+
+def test_probe_performs_initialize_and_session_handshake_without_prompt(tmp_path):
+    class HandshakeProcess:
+        def __init__(self):
+            self.stdin = io.StringIO()
+            self.stdout = io.StringIO(
+                json.dumps({"jsonrpc": "2.0", "id": 1, "result": {}})
+                + "\n"
+                + json.dumps(
+                    {"jsonrpc": "2.0", "id": 2, "result": {"sessionId": "session-1"}}
+                )
+                + "\n"
+            )
+            self.stderr = io.StringIO()
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            return None
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            return None
+
+    process = HandshakeProcess()
+    client = _make_home_client(tmp_path)
+    with _patch("agent.copilot_acp_client.subprocess.Popen", return_value=process):
+        client.probe(timeout_seconds=1)
+
+    requests = [json.loads(line) for line in process.stdin.getvalue().splitlines()]
+    assert [request["method"] for request in requests] == ["initialize", "session/new"]

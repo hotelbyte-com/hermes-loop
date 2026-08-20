@@ -8,9 +8,10 @@ few lines later, aborting the entire image build. The fix replaces every
 existence-based check that guards a subsequent ``< /dev/tty`` redirect with
 an open-based probe so the skip kicks in correctly.
 
-This module covers all three affected functions: ``run_setup_wizard()``
+This module covers all four affected functions: ``run_setup_wizard()``
 (the reproducer in #16746), ``install_system_packages()`` (the apt sudo
-prompt fallback), and ``maybe_start_gateway()`` (the gateway-install gate).
+prompt fallback), ``maybe_start_gateway()`` (the gateway-install gate), and
+``main()`` (the direct launch after an interactive install).
 """
 
 from __future__ import annotations
@@ -25,7 +26,12 @@ INSTALL_SH = REPO_ROOT / "scripts" / "install.sh"
 
 # Every function in scripts/install.sh that previously gated on a bare
 # ``[ -e /dev/tty ]`` check before redirecting stdin from ``/dev/tty``.
-GATED_FUNCTIONS = ("run_setup_wizard", "install_system_packages", "maybe_start_gateway")
+GATED_FUNCTIONS = (
+    "run_setup_wizard",
+    "install_system_packages",
+    "maybe_start_gateway",
+    "main",
+)
 
 
 def _extract_function_body(name: str) -> str:
@@ -89,3 +95,14 @@ def test_tty_gate_uses_open_based_probe(fn_name: str) -> None:
         "(an `if`/`if !`/`elif` whose test redirects stdin from /dev/tty), "
         "not a mere existence check. See #16746."
     )
+
+
+def test_interactive_setup_and_direct_launch_read_from_tty() -> None:
+    """Piped installs must keep both interactive phases attached to the tty."""
+    setup_body = _extract_function_body("run_setup_wizard")
+    main_body = _extract_function_body("main")
+
+    assert 'hermes_cli.main setup < /dev/tty' in setup_body
+    assert '[ "$RUN_SETUP" = false ] || [ "$NON_INTERACTIVE" = true ]' in setup_body
+    assert 'exec "$(readiness_command)" < /dev/tty' in main_body
+    assert '[ "$RUN_SETUP" = true ] && [ "$NON_INTERACTIVE" = false ]' in main_body

@@ -61,6 +61,10 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Keep independently invoked stages and the final launch on the caller's
+# selected profile, including when -HermesHome is explicit.
+$env:HERMES_HOME = $HermesHome
+
 # Suppress Invoke-WebRequest's per-chunk progress bar.  Windows PowerShell
 # 5.1's progress UI repaints synchronously on every received byte, which
 # pegs CPU on a single core and throttles downloads by 10-100x (a 57MB
@@ -143,7 +147,7 @@ $PythonVersion = "3.11"
 # available, in preference order.  uv discovers both uv-managed and system
 # interpreters, so this list also matches a pre-existing system Python.  Single
 # source of truth shared by Test-Python's fallback and Resolve-AvailablePythonVersion.
-$PythonFallbackVersions = @("3.12", "3.13", "3.10")
+$PythonFallbackVersions = @("3.12", "3.13")
 $NodeVersion = "22"
 
 # Stage-protocol version.  Bumped only for genuinely breaking changes to the
@@ -540,6 +544,24 @@ function Resolve-AvailablePythonVersion {
     return $null
 }
 
+function Test-SupportedPythonExecutable {
+    param([string]$PythonExe)
+
+    if (-not $PythonExe -or -not (Test-Path -LiteralPath $PythonExe)) {
+        return $false
+    }
+    $prevEAP = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        & $PythonExe -c "import sys; raise SystemExit(0 if (3, 11) <= sys.version_info[:2] < (3, 14) else 1)" 2>$null | Out-Null
+        return $LASTEXITCODE -eq 0
+    } catch {
+        return $false
+    } finally {
+        $ErrorActionPreference = $prevEAP
+    }
+}
+
 function Test-Python {
     Write-Info "Checking Python $PythonVersion..."
     
@@ -594,8 +616,8 @@ function Test-Python {
         Write-Warn "uv python install error: $_"
     }
 
-    # Fallback: check if ANY Python 3.10+ is already available on the system
-    Write-Info "Trying to find any existing Python 3.10+..."
+    # Fallback: check if any supported Python 3.11-3.13 is already available
+    Write-Info "Trying to find any existing Python 3.11-3.13..."
     foreach ($fallbackVer in $PythonFallbackVersions) {
         try {
             $pythonPath = & $UvCmd python find $fallbackVer 2>$null
@@ -634,7 +656,7 @@ function Test-Python {
                 $ErrorActionPreference = "Continue"
                 $sysVer = & python --version 2>&1
                 $ErrorActionPreference = $prevEAP2
-                if ($sysVer -match "Python 3\.(1[0-9]|[1-9][0-9])") {
+                if ($sysVer -match "Python 3\.(11|12|13)(\D|$)") {
                     Write-Success "Using system Python: $sysVer"
                     return $true
                 }
@@ -1497,6 +1519,7 @@ function Install-Repository {
 
     # Set per-repo config (harmless if it fails)
     Push-Location $InstallDir
+    $env:HERMES_HOME = $HermesHome
     git -c windows.appendAtomically=false config windows.appendAtomically false 2>$null
     # Pin autocrlf=false on the managed clone so git never renormalizes the
     # repo's LF text files to CRLF in the working tree. Without this, the very
@@ -1560,14 +1583,27 @@ function Install-Venv {
     
     Push-Location $InstallDir
     
+    $venvPythonExe = Join-Path $InstallDir "venv\Scripts\python.exe"
+    $venvHealthy = $false
+    if (Test-Path $venvPythonExe) {
+        $venvHealthy = Test-SupportedPythonExecutable -PythonExe $venvPythonExe
+    }
+    if ($venvHealthy) {
+        $env:UV_PYTHON = $venvPythonExe
+        Pop-Location
+        Write-Info "Virtual environment already usable, keeping it"
+        return
+    }
+
     if (Test-Path "venv") {
+        # Keep this legacy marker: the installer contract and process-cleanup
+        # regression tests identify the recreate branch by this message.
         Write-Info "Virtual environment already exists, recreating..."
+        Write-Warn "Existing virtual environment is not usable; preserving it before repair"
         # On Windows, native Python extensions (e.g. _bcrypt.pyd, tornado's
         # speedups.pyd) are loaded as DLLs by any running hermes process.
-        # Windows denies deletion of loaded DLLs, so every process running out
-        # of this venv must be stopped before removing it -- otherwise
-        # Remove-Item fails with "Access to the path '...' is denied" and the
-        # whole install/update aborts at this stage.
+        # Windows denies moving loaded DLLs, so every process running out of
+        # this venv must be stopped before preserving it for repair.
         if ($env:OS -eq "Windows_NT") {
             $myPid = $PID
             Write-Info "Stopping any running hermes processes before recreating venv..."
@@ -1602,14 +1638,17 @@ function Install-Venv {
             }
             Start-Sleep -Milliseconds 800
         }
-        Remove-Item -Recurse -Force "venv" -ErrorAction SilentlyContinue
-        # A killed process can take a moment to release its file handles, so a
-        # first Remove-Item may still hit a locked .pyd. Retry once after a short
-        # pause before giving up and letting the stage fail loudly.
+        $brokenVenv = "venv.broken.$([DateTime]::UtcNow.ToString('yyyyMMddHHmmss')).$([System.Guid]::NewGuid().ToString('N').Substring(0, 6))"
+        Move-Item -Path "venv" -Destination $brokenVenv
+        Write-Info "Preserved previous virtual environment at $InstallDir\$brokenVenv"
         if (Test-Path "venv") {
-            Start-Sleep -Seconds 2
             Remove-Item -Recurse -Force "venv"
         }
+    }
+
+    if (-not $resolved) {
+        Pop-Location
+        throw "No supported Python interpreter found; requires >=3.11,<3.14. Install Python 3.11, 3.12, or 3.13 and re-run the installer."
     }
     
     # uv creates the venv and pins the Python version in one step.  uv emits
@@ -1638,6 +1677,10 @@ function Install-Venv {
     if (Test-Path $venvPythonExe) {
         $env:UV_PYTHON = $venvPythonExe
     }
+    if (-not (Test-SupportedPythonExecutable -PythonExe $venvPythonExe)) {
+        Pop-Location
+        throw "Created virtual environment uses unsupported Python; requires >=3.11,<3.14. Install a supported Python and re-run the installer."
+    }
 
     Pop-Location
     
@@ -1663,9 +1706,11 @@ function Install-Dependencies {
     # (no cp314 wheels yet).
     if (-not $NoVenv) {
         $venvPythonExe = Join-Path $InstallDir "venv\Scripts\python.exe"
-        if (Test-Path $venvPythonExe) {
-            $env:UV_PYTHON = $venvPythonExe
+        if (-not (Test-SupportedPythonExecutable -PythonExe $venvPythonExe)) {
+            Pop-Location
+            throw "Existing virtual environment is outside the supported range (>=3.11,<3.14). Recover with: cd '$InstallDir'; uv venv venv --python 3.11"
         }
+        $env:UV_PYTHON = $venvPythonExe
     }
 
     # Hash-verified install (Tier 0) -- when uv.lock is present, prefer
@@ -1703,8 +1748,7 @@ function Install-Dependencies {
             # complete, hash-verified install.
             $skipPipFallback = $true
         } else {
-            Write-Warn "uv.lock sync failed (lockfile may be stale), falling back to PyPI resolve..."
-            $skipPipFallback = $false
+            throw "uv.lock sync failed; refusing unverified dependency resolution. Recover with: cd '$InstallDir'; `$env:UV_PROJECT_ENVIRONMENT='$InstallDir\venv'; uv sync --extra all --locked"
         }
     } else {
         Write-Info "uv.lock not found -- falling back to PyPI resolve (no hash verification)"
@@ -2841,7 +2885,65 @@ function Invoke-SetupWizard {
     Pop-Location
 }
 
+function Invoke-Readiness {
+    $hermesCmd = if ($NoVenv) { "$InstallDir\hermes.exe" } else { "$InstallDir\venv\Scripts\hermes.exe" }
+    $pythonCmd = if ($NoVenv) { (Get-Command python -ErrorAction SilentlyContinue).Source } else { "$InstallDir\venv\Scripts\python.exe" }
+    if (-not (Test-Path $hermesCmd)) {
+        Write-Err "Hermes executable is missing; installation is not ready"
+        Write-Info ("Recover with: cd " + $InstallDir + "; uv pip install -e '.[all]'")
+        return 1
+    }
+    if (-not $pythonCmd -or -not (Test-Path $pythonCmd)) {
+        Write-Err "Hermes Python runtime is missing; installation is not ready"
+        return 1
+    }
+
+    $env:HERMES_HOME = $HermesHome
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    $raw = @(& $hermesCmd doctor --ready --json 2>&1 | ForEach-Object { "$_" })
+    $readinessExit = $LASTEXITCODE
+    $ErrorActionPreference = $prevEAP
+    $receiptJson = ($raw -join [Environment]::NewLine).Trim()
+
+    $validation = @($receiptJson | & $pythonCmd -m hermes_cli.readiness --validate --exit-code $readinessExit 2>$null)
+    $validationExit = $LASTEXITCODE
+    if ($validationExit -ne 0 -or $validation.Count -lt 1) {
+        Write-Err "Hermes readiness returned an invalid or contradictory receipt"
+        Write-Info ("Next command: cd " + $InstallDir + "; hermes doctor")
+        return 1
+    }
+
+    $receiptStatus = [string]$validation[0]
+    $receiptNextCommand = if ($validation.Count -gt 1) { [string]$validation[1] } else { "" }
+    $receiptJson | Write-Host
+    switch ($receiptStatus) {
+        "ready" {
+            Write-Success "Hermes readiness: ready"
+            return 0
+        }
+        "incomplete_setup" {
+            Write-Warn "Hermes readiness: incomplete_setup"
+            if ($receiptNextCommand) {
+                Write-Info "Next command: $receiptNextCommand"
+            } else {
+                Write-Info "Next command: hermes setup"
+            }
+            return 2
+        }
+        default {
+            Write-Err "Hermes readiness: failure (exit $readinessExit)"
+            Write-Info ("Run: cd " + $InstallDir + "; hermes doctor")
+            return 1
+        }
+    }
+}
+
 function Start-GatewayIfConfigured {
+    if ($SkipSetup -or $NonInteractive) {
+        Write-Info "Skipping gateway startup (install-only mode)"
+        return
+    }
     $envPath = "$HermesHome\.env"
     if (-not (Test-Path $envPath)) { return }
 
@@ -2874,6 +2976,7 @@ function Start-GatewayIfConfigured {
             $response = Read-Host "Pair WhatsApp now? [Y/n]"
             if ($response -eq "" -or $response -match "^[Yy]") {
                 try {
+                    $env:HERMES_HOME = $HermesHome
                     & $hermesCmd whatsapp
                 } catch {
                     # Expected after pairing completes
@@ -2904,6 +3007,7 @@ function Start-GatewayIfConfigured {
         Write-Info "Starting gateway in background..."
         try {
             $logFile = "$HermesHome\logs\gateway.log"
+            $env:HERMES_HOME = $HermesHome
             Start-Process -FilePath $hermesCmd -ArgumentList "gateway" `
                 -RedirectStandardOutput $logFile `
                 -RedirectStandardError "$HermesHome\logs\gateway-error.log" `
@@ -2959,7 +3063,13 @@ function Write-Completion {
     
     Write-Host "---------------------------------------------------------" -ForegroundColor Cyan
     Write-Host ""
-    Write-Host "[*] Restart your terminal for PATH changes to take effect" -ForegroundColor Yellow
+    if (-not $SkipSetup -and -not $NonInteractive) {
+        Write-Host "[*] Setup is ready; Hermes will launch directly from the installed executable." -ForegroundColor Yellow
+    } else {
+        Write-Host "[*] Install-only mode: run the installed Hermes executable after setup." -ForegroundColor Yellow
+        $installedHermes = if ($NoVenv) { "$InstallDir\hermes.exe" } else { "$InstallDir\venv\Scripts\hermes.exe" }
+        Write-Host "    $installedHermes" -ForegroundColor Yellow
+    }
     Write-Host ""
     
     if (-not $HasNode) {
@@ -3075,6 +3185,7 @@ $InstallStages += @(
     # caller (GUI / CI) handles the equivalent UX themselves.
     @{ Name = "configure";        Title = "Configuring API keys and models";      Category = "post-install"; NeedsUserInput = $true;  Worker = "Stage-Configure" }
     @{ Name = "gateway";          Title = "Starting messaging gateway";           Category = "post-install"; NeedsUserInput = $true;  Worker = "Stage-Gateway" }
+    @{ Name = "readiness";        Title = "Verifying Hermes readiness";           Category = "post-install"; NeedsUserInput = $false; Worker = "Stage-Readiness" }
 )
 
 # Stage workers -- thin wrappers that delegate to the existing Install-* /
@@ -3114,6 +3225,10 @@ function Stage-PlatformSdks     { Resolve-UvCmd; Install-PlatformSdks }
 function Stage-BootstrapMarker  { Write-BootstrapMarker }
 function Stage-Configure        { Invoke-SetupWizard }
 function Stage-Gateway          { Start-GatewayIfConfigured }
+function Stage-Readiness        {
+    $code = Invoke-Readiness
+    if ($code -ne 0) { throw "Hermes readiness did not pass (exit $code)" }
+}
 
 function Get-InstallStage {
     param([string]$Name)
@@ -3206,6 +3321,7 @@ function Invoke-Stage {
 function Invoke-AllStages {
     Step-OutOfInstallDir
     foreach ($s in $InstallStages) {
+        if ($s.Name -eq "readiness") { continue }
         Invoke-Stage -StageDef $s
     }
 }
@@ -3255,10 +3371,21 @@ function Invoke-PostInstallMode {
 function Main {
     Write-Banner
     Invoke-AllStages
+    $readinessCode = Invoke-Readiness
+    if ($readinessCode -ne 0) {
+        exit $readinessCode
+    }
     if (-not $Json) {
         Write-Completion
     } else {
         @{ ok = $true; protocol_version = $InstallStageProtocolVersion } | ConvertTo-Json -Compress | Write-Output
+    }
+    if (-not $SkipSetup -and -not $NonInteractive -and -not $Json) {
+        $hermesCmd = if ($NoVenv) { "$InstallDir\hermes.exe" } else { "$InstallDir\venv\Scripts\hermes.exe" }
+        $env:HERMES_HOME = $HermesHome
+        Write-Success "Launching Hermes directly from the installed executable"
+        & $hermesCmd
+        exit $LASTEXITCODE
     }
 }
 

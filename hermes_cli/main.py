@@ -4260,6 +4260,13 @@ def cmd_doctor(args):
     """Check configuration and dependencies."""
     from hermes_cli.doctor import run_doctor
 
+    if getattr(args, "ready", False):
+        if not getattr(args, "json", False):
+            print("hermes doctor --ready requires --json", file=sys.stderr)
+            raise SystemExit(2)
+        from hermes_cli.readiness import print_readiness_receipt
+
+        raise SystemExit(print_readiness_receipt())
     run_doctor(args)
 
 

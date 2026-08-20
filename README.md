@@ -50,7 +50,7 @@ Run this in PowerShell:
 iex (irm https://hermes-agent.nousresearch.com/install.ps1)
 ```
 
-The installer handles everything: uv, Python 3.11, Node.js, ripgrep, ffmpeg, **and a portable Git Bash** (MinGit, unpacked to `%LOCALAPPDATA%\hermes\git` — no admin required, completely isolated from any system Git install). Hermes uses this bundled Git Bash to run shell commands.
+The installer handles everything: uv, Python 3.11–3.13, Node.js, ripgrep, ffmpeg, **and a portable Git Bash** (MinGit, unpacked to `%LOCALAPPDATA%\hermes\git` — no admin required, completely isolated from any system Git install). Hermes uses this bundled Git Bash to run shell commands.
 
 If you already have Git installed, the installer detects it and uses that instead. Otherwise a ~45MB MinGit download is all you need — it won't touch or interfere with any system Git.
 
@@ -58,12 +58,88 @@ If you already have Git installed, the installer detects it and uses that instea
 >
 > **Windows:** Native Windows is fully supported — the PowerShell one-liner above installs everything. If you'd rather use WSL2, the Linux command works there too. Native Windows install lives under `%LOCALAPPDATA%\hermes`; WSL2 installs under `~/.hermes` as on Linux.
 
-After installation:
+The interactive installer preserves an existing `HERMES_HOME` (config,
+credentials, sessions, and skills), runs setup and a machine-readable
+readiness check, then starts the installed Hermes executable directly. No
+shell reload or parent-shell `PATH` change is required.
+
+## Choose your collaboration lane
+
+### Engineer: terminal and automation
+
+Supported engineer environments are Linux, macOS, WSL2, native Windows, and
+the documented Termux profile. The installers provision uv and a supported
+Python **3.11–3.13** runtime; network access is required. Unix/WSL2 needs
+`curl` and `bash`. Native Windows needs PowerShell 5.1+ (PowerShell 7 is also
+supported). Git, Node.js, ripgrep, and ffmpeg are installed or detected by the
+installer; Node.js is optional for browser tools.
+
+The canonical commands are:
 
 ```bash
-source ~/.bashrc    # reload shell (or: source ~/.zshrc)
-hermes              # start chatting!
+curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
 ```
+
+```powershell
+iex (irm https://hermes-agent.nousresearch.com/install.ps1)
+```
+
+When setup is complete, the installer prints one bounded receipt like this
+(credentials and auth material are never included):
+
+```json
+{"schema_version":1,"status":"ready","ready":true,"gateway":{"status":"optional_absent","optional":true}}
+```
+
+You can check the same contract later with:
+
+```bash
+hermes doctor --ready --json
+```
+
+`status` is `ready`, `incomplete_setup`, or `failure`. A ready receipt with
+`gateway.status` set to `optional_absent` means local CLI collaboration is
+ready and messaging is simply not configured. `incomplete_setup` gives the
+exact `next_command` (normally `hermes setup`); `failure` stops before launch.
+If messaging credentials exist but no gateway runtime is healthy,
+`gateway.status` is `optional_unavailable`; local CLI readiness is not blocked.
+For a failed dependency, network, config, or auth check, keep the installer
+logs and rerun the named recovery command. Do not paste keys into shell
+arguments or logs.
+
+For automation, `--skip-setup` and `--non-interactive` remain install-only
+paths. They preserve state, print an incomplete receipt when setup is missing,
+and do not claim that collaboration is ready or launch a partial install:
+
+```bash
+curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash -s -- --skip-setup
+hermes setup
+hermes
+```
+
+The messaging gateway is optional. Start it only after local setup when you
+want Telegram, Discord, Slack, WhatsApp, Signal, or cron delivery:
+
+```bash
+hermes gateway
+```
+
+### Product manager: Desktop
+
+Download the prebuilt [Hermes Desktop](https://hermes-agent.nousresearch.com/)
+for macOS, Windows, or Linux. Desktop owns progress, onboarding, retry, and
+launch; it converges on the same Hermes runtime and `HERMES_HOME` as the
+engineer path, including `config.yaml`, `.env`/auth, sessions, and skills.
+There is no terminal prerequisite for this lane. Messaging gateway setup is a
+later, explicit choice.
+
+### Docker/container (advanced)
+
+Docker is a separate container lane for operators who need an isolated
+runtime. Start with the [Docker guide](https://hermes-agent.nousresearch.com/docs/user-guide/deployment/docker)
+and persist `/opt/data` (the container's `HERMES_HOME`). Do not use an
+unauthenticated public bind or copy the Windows compose `--insecure` settings
+into a deployment. Docker is not required for the first local conversation.
 
 ### Troubleshooting
 

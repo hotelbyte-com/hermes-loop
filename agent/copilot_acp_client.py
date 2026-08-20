@@ -428,7 +428,11 @@ class CopilotACPClient:
             model=model or "copilot-acp",
         )
 
-    def _run_prompt(self, prompt_text: str, *, timeout_seconds: float) -> tuple[str, str]:
+    def probe(self, *, timeout_seconds: float = 10.0) -> None:
+        """Perform the ACP initialize/session handshake without generating a turn."""
+        self._run_prompt(None, timeout_seconds=timeout_seconds)
+
+    def _run_prompt(self, prompt_text: str | None, *, timeout_seconds: float) -> tuple[str, str]:
         try:
             proc = subprocess.Popen(
                 [self._acp_command] + self._acp_args,
@@ -567,6 +571,9 @@ class CopilotACPClient:
             session_id = str(session.get("sessionId") or "").strip()
             if not session_id:
                 raise RuntimeError("Copilot ACP did not return a sessionId.")
+
+            if prompt_text is None:
+                return "", ""
 
             text_parts: list[str] = []
             reasoning_parts: list[str] = []

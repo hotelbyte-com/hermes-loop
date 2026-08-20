@@ -43,14 +43,83 @@ curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
 > ```powershell
 > iex (irm https://hermes-agent.nousresearch.com/install.ps1)
 > ```
-> 安装完成后，可能需要重启终端，然后运行 `hermes` 开始对话。
+> 安装完成后会直接启动 Hermes；之后运行 `hermes` 即可继续对话。
 
-安装后：
+交互式安装会保留已有的 `HERMES_HOME`（配置、凭据、会话和技能），完成
+设置后运行机器可读的就绪检查，并直接启动已安装的 Hermes 可执行文件。
+不需要重新加载 shell，也不依赖父 shell 是否刷新了 `PATH`。
+
+## 选择协作入口
+
+### 工程师：终端与自动化
+
+支持的工程师环境包括 Linux、macOS、WSL2、原生 Windows，以及文档中的
+Termux 配置。安装器会提供受支持的 **Python 3.11–3.13** 和 uv；需要可用
+网络。Unix/WSL2 需要 `curl` 和 `bash`；原生 Windows 需要 PowerShell 5.1+
+（也支持 PowerShell 7）。Git、Node.js、ripgrep 和 ffmpeg 会由安装器检测或
+安装；Node.js 对浏览器工具是可选的。
+
+当前工程师入口保持不变：
 
 ```bash
-source ~/.bashrc    # 重新加载 shell（或: source ~/.zshrc）
-hermes              # 开始对话！
+curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
 ```
+
+```powershell
+iex (irm https://hermes-agent.nousresearch.com/install.ps1)
+```
+
+设置完成后会打印一个有界的就绪 receipt（绝不包含凭据或认证材料）：
+
+```json
+{"schema_version":1,"status":"ready","ready":true,"gateway":{"status":"optional_absent","optional":true}}
+```
+
+之后也可以执行同一个检查：
+
+```bash
+hermes doctor --ready --json
+```
+
+`status` 取值为 `ready`、`incomplete_setup` 或 `failure`。当
+`gateway.status` 为 `optional_absent` 时，表示本地 CLI 协作已就绪，只是尚未
+配置消息网关。`incomplete_setup` 会给出精确的 `next_command`（通常是
+`hermes setup`）；`failure` 会在启动前停止。依赖、网络、配置或认证失败时，
+请保留安装日志并执行 receipt 指定的恢复命令，不要把密钥放进命令参数或日志。
+如果存在消息凭据但没有健康的网关运行时，`gateway.status` 会是
+`optional_unavailable`；这不会阻塞本地 CLI 就绪。
+
+自动化场景中的 `--skip-setup` 和 `--non-interactive` 仍然是“只安装”路径：
+它们会保留现有状态，设置缺失时打印 incomplete receipt，不会谎称已就绪，也
+不会启动不完整的安装：
+
+```bash
+curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash -s -- --skip-setup
+hermes setup
+hermes
+```
+
+消息网关不是首次本地对话的前置条件。需要 Telegram、Discord、Slack、WhatsApp、
+Signal 或 cron 投递时，再显式启动：
+
+```bash
+hermes gateway
+```
+
+### 产品经理：Desktop
+
+下载适用于 macOS、Windows 或 Linux 的预构建
+[Hermes Desktop](https://hermes-agent.nousresearch.com/)。Desktop 负责进度、
+首次引导、重试和启动，并与工程师路径汇聚到同一个 Hermes runtime 和
+`HERMES_HOME`，包括 `config.yaml`、`.env`/认证、会话和技能。本路径不要求
+使用终端；消息网关仍是之后的可选操作。
+
+### Docker/容器（高级路径）
+
+Docker 是面向需要隔离运行时的运维者的独立路径，请参考
+[Docker 指南](https://hermes-agent.nousresearch.com/docs/user-guide/deployment/docker)
+并持久化容器内的 `/opt/data`（即 `HERMES_HOME`）。不要把未认证的公开绑定或
+Windows compose 中的 `--insecure` 配置用于部署。首次本地对话不需要 Docker。
 
 ---
 
