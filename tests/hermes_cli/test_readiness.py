@@ -353,6 +353,57 @@ def test_provider_probe_preserves_anthropic_models_path(monkeypatch):
     assert seen == ["https://api.anthropic.com/v1/models"]
 
 
+def test_provider_probe_uses_anthropic_oauth_headers(monkeypatch):
+    import httpx
+
+    seen = {}
+    monkeypatch.setattr(
+        "hermes_cli.runtime_provider.resolve_runtime_provider",
+        lambda **_kwargs: {
+            "provider": "anthropic",
+            "api_mode": "anthropic_messages",
+            "base_url": "https://api.anthropic.com",
+            "api_key": "sk-ant-oat01-test",
+        },
+    )
+    monkeypatch.setattr(
+        "hermes_cli.config.get_env_value",
+        lambda _key: "sk-ant-oat01-test",
+    )
+    monkeypatch.setattr(
+        httpx,
+        "get",
+        lambda url, **kwargs: (seen.update(url=url, headers=kwargs["headers"]) or type("Response", (), {"status_code": 200})()),
+    )
+
+    assert readiness._provider_access_error("anthropic", {}) is None
+    assert seen["headers"]["Authorization"] == "Bearer sk-ant-oat01-test"
+    assert seen["headers"]["anthropic-beta"] == "claude-code-20250219,oauth-2025-04-20"
+    assert seen["headers"]["x-app"] == "cli"
+    assert "x-api-key" not in seen["headers"]
+
+
+def test_provider_probe_skips_non_probeable_provider(monkeypatch):
+    import httpx
+
+    monkeypatch.setattr(
+        "hermes_cli.runtime_provider.resolve_runtime_provider",
+        lambda **_kwargs: {
+            "provider": "xiaomi",
+            "api_mode": "chat_completions",
+            "base_url": "https://api.xiaomimimo.com/v1",
+            "api_key": "mimo-key",
+        },
+    )
+    monkeypatch.setattr(
+        "hermes_cli.config.get_env_value",
+        lambda _key: "mimo-key",
+    )
+    monkeypatch.setattr(httpx, "get", lambda *_args, **_kwargs: pytest.fail("MiMo must not be probed"))
+
+    assert readiness._provider_access_error("xiaomi", {}) is None
+
+
 def test_provider_probe_uses_runtime_pool_base_url_and_key(monkeypatch):
     import httpx
     import providers

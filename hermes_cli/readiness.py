@@ -240,7 +240,7 @@ def _provider_access_error(provider: str, config: dict[str, Any]) -> str | None:
 
         profile = get_provider_profile(runtime_provider)
         if profile is not None and not getattr(profile, "supports_health_check", True):
-            return "provider_auth_unverified"
+            return None
 
         api_mode = str(runtime.get("api_mode") or determine_api_mode(runtime_provider, base_url))
 
@@ -267,12 +267,26 @@ def _provider_access_error(provider: str, config: dict[str, Any]) -> str | None:
         headers: dict[str, str] = {"User-Agent": "hermes-readiness"}
         if profile is not None:
             headers.update(getattr(profile, "default_headers", {}) or {})
-        if token and (callable(api_key) or runtime.get("auth_mode") == "entra_id"):
+        anthropic_oauth = False
+        if token and api_mode == "anthropic_messages":
+            from agent.anthropic_adapter import (
+                _OAUTH_ONLY_BETAS,
+                _get_claude_code_version,
+                _is_oauth_token,
+            )
+
+            anthropic_oauth = _is_oauth_token(token)
+            if anthropic_oauth:
+                headers["Authorization"] = f"Bearer {token}"
+                headers["anthropic-beta"] = ",".join(_OAUTH_ONLY_BETAS)
+                headers["user-agent"] = f"claude-cli/{_get_claude_code_version()} (external, cli)"
+                headers["x-app"] = "cli"
+        if token and not anthropic_oauth and (callable(api_key) or runtime.get("auth_mode") == "entra_id"):
             headers["Authorization"] = f"Bearer {token}"
-        elif token and api_mode == "anthropic_messages":
+        elif token and not anthropic_oauth and api_mode == "anthropic_messages":
             headers["x-api-key"] = token
             headers["anthropic-version"] = "2023-06-01"
-        elif token:
+        elif token and not anthropic_oauth:
             headers["Authorization"] = f"Bearer {token}"
         if token and base_url.lower().find("generativelanguage.googleapis.com") >= 0:
             headers.pop("Authorization", None)

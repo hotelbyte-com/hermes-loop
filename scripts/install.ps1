@@ -2886,7 +2886,7 @@ function Invoke-SetupWizard {
 }
 
 function Invoke-Readiness {
-    $hermesCmd = if ($NoVenv) { "$InstallDir\hermes.exe" } else { "$InstallDir\venv\Scripts\hermes.exe" }
+    $hermesCmd = if ($NoVenv) { (Get-Command hermes -ErrorAction SilentlyContinue).Source } else { "$InstallDir\venv\Scripts\hermes.exe" }
     $pythonCmd = if ($NoVenv) { (Get-Command python -ErrorAction SilentlyContinue).Source } else { "$InstallDir\venv\Scripts\python.exe" }
     if (-not (Test-Path $hermesCmd)) {
         Write-Err "Hermes executable is missing; installation is not ready"
@@ -3381,7 +3381,7 @@ function Main {
         @{ ok = $true; protocol_version = $InstallStageProtocolVersion } | ConvertTo-Json -Compress | Write-Output
     }
     if (-not $SkipSetup -and -not $NonInteractive -and -not $Json) {
-        $hermesCmd = if ($NoVenv) { "$InstallDir\hermes.exe" } else { "$InstallDir\venv\Scripts\hermes.exe" }
+        $hermesCmd = if ($NoVenv) { (Get-Command hermes -ErrorAction SilentlyContinue).Source } else { "$InstallDir\venv\Scripts\hermes.exe" }
         $env:HERMES_HOME = $HermesHome
         Write-Success "Launching Hermes directly from the installed executable"
         & $hermesCmd

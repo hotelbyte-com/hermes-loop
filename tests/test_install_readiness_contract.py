@@ -38,6 +38,11 @@ def test_windows_installer_has_equivalent_readiness_and_direct_launch():
     assert "Next command: hermes setup" in source
 
 
+def test_windows_no_venv_uses_path_hermes_command_for_readiness_and_launch():
+    source = (ROOT / "scripts/install.ps1").read_text(encoding="utf-8")
+    assert source.count('(Get-Command hermes -ErrorAction SilentlyContinue).Source') >= 2
+
+
 def test_installers_reject_venv_interpreters_outside_project_constraint():
     unix_source = (ROOT / "scripts/install.sh").read_text(encoding="utf-8")
     windows_source = (ROOT / "scripts/install.ps1").read_text(encoding="utf-8")
