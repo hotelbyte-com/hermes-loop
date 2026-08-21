@@ -271,6 +271,7 @@ def _provider_access_error(provider: str, config: dict[str, Any]) -> str | None:
         if token and api_mode == "anthropic_messages":
             from agent.anthropic_adapter import (
                 _OAUTH_ONLY_BETAS,
+                _common_betas_for_base_url,
                 _get_claude_code_version,
                 _is_oauth_token,
             )
@@ -278,7 +279,9 @@ def _provider_access_error(provider: str, config: dict[str, Any]) -> str | None:
             anthropic_oauth = _is_oauth_token(token)
             if anthropic_oauth:
                 headers["Authorization"] = f"Bearer {token}"
-                headers["anthropic-beta"] = ",".join(_OAUTH_ONLY_BETAS)
+                headers["anthropic-version"] = "2023-06-01"
+                common_betas = _common_betas_for_base_url(base_url)
+                headers["anthropic-beta"] = ",".join(common_betas + _OAUTH_ONLY_BETAS)
                 headers["user-agent"] = f"claude-cli/{_get_claude_code_version()} (external, cli)"
                 headers["x-app"] = "cli"
         if token and not anthropic_oauth and (callable(api_key) or runtime.get("auth_mode") == "entra_id"):

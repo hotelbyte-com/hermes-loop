@@ -2887,7 +2887,12 @@ function Invoke-SetupWizard {
 
 function Invoke-Readiness {
     $hermesCmd = if ($NoVenv) { (Get-Command hermes -ErrorAction SilentlyContinue).Source } else { "$InstallDir\venv\Scripts\hermes.exe" }
-    $pythonCmd = if ($NoVenv) { (Get-Command python -ErrorAction SilentlyContinue).Source } else { "$InstallDir\venv\Scripts\python.exe" }
+    if ($NoVenv) {
+        Resolve-UvCmd
+        $pythonCmd = & $UvCmd python find $PythonVersion 2>$null
+    } else {
+        $pythonCmd = "$InstallDir\venv\Scripts\python.exe"
+    }
     if (-not (Test-Path $hermesCmd)) {
         Write-Err "Hermes executable is missing; installation is not ready"
         Write-Info ("Recover with: cd " + $InstallDir + "; uv pip install -e '.[all]'")
