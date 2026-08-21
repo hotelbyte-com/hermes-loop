@@ -2889,7 +2889,8 @@ function Invoke-Readiness {
     $hermesCmd = if ($NoVenv) { (Get-Command hermes -ErrorAction SilentlyContinue).Source } else { "$InstallDir\venv\Scripts\hermes.exe" }
     if ($NoVenv) {
         Resolve-UvCmd
-        $pythonCmd = & $UvCmd python find $PythonVersion 2>$null
+        $resolved = Resolve-AvailablePythonVersion
+        $pythonCmd = if ($resolved) { & $UvCmd python find $resolved 2>$null } else { $null }
     } else {
         $pythonCmd = "$InstallDir\venv\Scripts\python.exe"
     }
