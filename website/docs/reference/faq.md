@@ -150,11 +150,13 @@ See the [Python Library guide](../user-guide/features/code-execution.md) for ful
 
 #### `hermes: command not found` after installation
 
-**Cause:** Your shell hasn't reloaded the updated PATH.
+**Cause:** A shell that was already open before installation may not have the
+updated PATH yet. The installer itself launches the installed executable after
+a successful interactive setup.
 
 **Solution:**
 ```bash
-# Reload your shell profile
+# Open a new shell, or reload the profile
 source ~/.bashrc    # bash
 source ~/.zshrc     # zsh
 
@@ -173,7 +175,7 @@ The installer adds `~/.local/bin` to your PATH. If you use a non-standard shell 
 
 #### Python version too old
 
-**Cause:** Hermes requires Python 3.11 or newer.
+**Cause:** Hermes requires Python 3.11, 3.12, or 3.13.
 
 **Solution:**
 ```bash
@@ -184,7 +186,7 @@ sudo apt install python3.12   # Ubuntu/Debian
 brew install python@3.12      # macOS
 ```
 
-The installer handles this automatically — if you see this error during manual installation, upgrade Python first.
+The installer handles this automatically — if you see this error during manual installation, install a supported Python version first.
 
 #### Terminal commands say `node: command not found` (or `nvm`, `pyenv`, `asdf`, …)
 

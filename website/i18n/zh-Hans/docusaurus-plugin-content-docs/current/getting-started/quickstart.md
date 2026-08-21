@@ -68,10 +68,16 @@ curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
 :::
 
 :::tip Windows 用户
-请先安装 [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install)，然后在 WSL2 终端中运行上述命令。
+Windows 可通过 PowerShell 安装器原生运行，无需 WSL2：
+
+```powershell
+iex (irm https://hermes-agent.nousresearch.com/install.ps1)
+```
+
+WSL2 仍可作为替代方案。
 :::
 
-安装完成后，重新加载 shell：
+交互式设置完成后，安装程序会执行就绪检查并直接启动 Hermes。首次启动不需要重新加载 shell；如果当前 shell 在安装前已打开，请打开新的 shell 或重新加载配置后再使用 `hermes`：
 
 ```bash
 source ~/.bashrc   # 或 source ~/.zshrc

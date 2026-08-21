@@ -23,7 +23,7 @@ Hermes 可在 Windows 10 和 Windows 11 上原生运行——无需 WSL、Cygwin
 iex (irm https://hermes-agent.nousresearch.com/install.ps1)
 ```
 
-无需管理员权限。安装程序会写入 `%LOCALAPPDATA%\hermes\`，并将 `hermes` 添加到你的**用户 PATH**——安装完成后打开新终端即可使用。
+无需管理员权限。安装程序会写入 `%LOCALAPPDATA%\hermes\`、保留已有数据、执行就绪检查，并在交互式设置完成后启动已安装的可执行文件。若要在安装前已打开的 shell 中使用 `hermes`，请先打开新终端。
 
 **安装程序选项**（需要使用 scriptblock 形式传递参数）：
 
@@ -68,15 +68,15 @@ iex (irm https://hermes-agent.nousresearch.com/install.ps1)
 从头到尾，按顺序：
 
 1. **引导 `uv`** — Astral 的快速 Python 管理器。安装到 `%USERPROFILE%\.local\bin`。
-2. **通过 `uv` 安装 Python 3.11**。无需预先安装 Python。
+2. **通过 `uv` 安装 Python 3.11–3.13**。无需预先安装 Python。
 3. **安装 Node.js 22**（优先使用 winget，否则将便携式 Node 压缩包解压到 `%LOCALAPPDATA%\hermes\node`）。用于浏览器工具和 WhatsApp 桥接。
 4. **安装便携式 Git** — 如果 `git` 已在 PATH 中，安装程序直接使用；否则从官方 `git-for-windows` 发布版下载精简的自包含 **PortableGit**（约 45 MB）到 `%LOCALAPPDATA%\hermes\git`。无需管理员权限，不写入 Windows 安装程序注册表，不干扰系统上的其他任何内容。
 5. **将仓库克隆**到 `%LOCALAPPDATA%\hermes\hermes-agent` 并在其中创建 virtualenv。
 6. **分层 `uv pip install`** — 先尝试 `.[all]`，如果 `git+https` 依赖在 GitHub 限速时失败，则逐步回退到更小的集合（`[messaging,dashboard,ext]` → `[messaging]` → `.`）。防止"单次失败导致裸安装"的故障模式。
 7. **根据 `.env` 自动安装消息 SDK** — 如果存在 `TELEGRAM_BOT_TOKEN` / `DISCORD_BOT_TOKEN` / `SLACK_BOT_TOKEN` / `SLACK_APP_TOKEN` / `WHATSAPP_ENABLED`，则运行 `python -m ensurepip --upgrade` 并针对性地调用 `pip install`，确保各平台 SDK 可正常导入。
 8. **设置 `HERMES_GIT_BASH_PATH`** 为解析后的 `bash.exe` 路径，使 Hermes 在新 shell 中能确定性地找到它。
-9. **将 `%LOCALAPPDATA%\hermes\bin` 添加到用户 PATH** — 打开新终端后即可使用 `hermes` 命令。
-10. **运行 `hermes setup`** — 正常的首次运行向导（模型、提供商、工具集）。使用 `-SkipSetup` 跳过。
+9. **将 `%LOCALAPPDATA%\hermes\hermes-agent\venv\Scripts` 添加到用户 PATH，并设置 `HERMES_HOME=%LOCALAPPDATA%\hermes`** — 新终端中即可使用 `hermes` 命令，同时指向正确的数据目录。
+10. **运行 `hermes setup` 并检查就绪状态** — 完成正常的首次运行向导（模型、提供商、工具集）后执行机器可读的就绪检查。使用 `-SkipSetup` 跳过设置；只安装模式不会启动不完整的安装。
 
 :::tip 在 Windows 上跳过繁琐的提供商配置
 在 Windows 上，逐个配置工具 API key（Firecrawl、FAL、Browser Use、OpenAI TTS）是获得可用 agent 摩擦最大的部分。[Nous Portal](/user-guide/features/tool-gateway) 订阅通过一次 OAuth 登录即可覆盖模型**以及**所有这些工具。安装程序完成后，运行 `hermes setup --portal` 完成配置。

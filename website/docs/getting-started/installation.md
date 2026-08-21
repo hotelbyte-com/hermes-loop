@@ -50,7 +50,10 @@ The root-mode **FHS layout** (`/usr/local/lib/…`, `/usr/local/bin/hermes`) mat
 
 ### After Installation
 
-Reload your shell and start chatting:
+After interactive setup, the installer runs a readiness check and starts the
+installed Hermes executable directly. No shell reload is needed for the first
+launch. For a later shell that was already open before installation, open a new
+shell or reload its profile before using the `hermes` command:
 
 ```bash
 source ~/.bashrc   # or: source ~/.zshrc
@@ -84,7 +87,7 @@ That logs you in, sets Nous as your provider, and turns on the Tool Gateway in o
 **Installer:** On non-Windows platforms, the only prerequisite is **Git**. On Linux, also make sure `curl` and `xz-utils` are available (the installer downloads Node.js as a `.tar.xz` archive). The desktop app additionally requires `g++` (or `build-essential` on Debian/Ubuntu) to compile native modules. The installer automatically handles everything else:
 
 - **uv** (fast Python package manager)
-- **Python 3.11** (via uv, no sudo needed)
+- **Python 3.11–3.13** (via uv, no sudo needed)
 - **Node.js v22** (for browser automation and WhatsApp bridge)
 - **ripgrep** (fast file search)
 - **ffmpeg** (audio format conversion for TTS)
@@ -146,7 +149,7 @@ The same pattern works on Arch (the installer uses pacman with the same sudo-det
 
 | Problem | Solution |
 |---------|----------|
-| `hermes: command not found` | Reload your shell (`source ~/.bashrc`) or check PATH |
+| `hermes: command not found` | Open a new shell, reload your profile, or check PATH |
 | `API key not set` | Run `hermes model` to configure your provider, or `hermes config set OPENROUTER_API_KEY your_key` |
 | Missing config after update | Run `hermes config check` then `hermes config migrate` |
 

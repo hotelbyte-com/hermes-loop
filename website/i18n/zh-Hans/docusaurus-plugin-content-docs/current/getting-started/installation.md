@@ -28,7 +28,7 @@ curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
 iex (irm https://hermes-agent.nousresearch.com/install.ps1)
 ```
 
-安装程序处理**一切**：`uv`、Python 3.11、Node.js 22、`ripgrep`、`ffmpeg`，**以及一个便携式 Git Bash**（PortableGit——一个自包含的 Git-for-Windows 发行版，附带 `bash.exe` 和 Hermes 用于 shell 命令的完整 POSIX 工具链；在 32 位 Windows 上安装程序会回退到 MinGit，后者缺少 bash，终端工具和 agent 浏览器功能将被禁用）。它将仓库克隆到 `%LOCALAPPDATA%\hermes\hermes-agent`，创建虚拟环境，并将 `hermes` 添加到**用户 PATH**。安装完成后请重启终端（或打开新的 PowerShell 窗口）以使 PATH 生效。
+安装程序处理**一切**：`uv`、Python 3.11–3.13、Node.js 22、`ripgrep`、`ffmpeg`，**以及一个便携式 Git Bash**（PortableGit——一个自包含的 Git-for-Windows 发行版，附带 `bash.exe` 和 Hermes 用于 shell 命令的完整 POSIX 工具链；在 32 位 Windows 上安装程序会回退到 MinGit，后者缺少 bash，终端工具和 agent 浏览器功能将被禁用）。它将仓库克隆到 `%LOCALAPPDATA%\hermes\hermes-agent`，创建虚拟环境，并将 `hermes` 添加到**用户 PATH**。交互式设置完成后会执行就绪检查并直接启动 Hermes，不需要为首次启动重启终端。
 
 **Git 的处理方式：**
 
@@ -93,7 +93,7 @@ Root 模式的 **FHS 布局**（`/usr/local/lib/…`、`/usr/local/bin/hermes`�
 
 ### 安装后
 
-重新加载 shell 并开始聊天：
+交互式设置完成后，安装程序会执行就绪检查并直接启动 Hermes。首次启动不需要重新加载 shell；如果当前 shell 在安装前已打开，请打开新的 shell 或重新加载配置后再使用 `hermes`：
 
 ```bash
 source ~/.bashrc   # 或：source ~/.zshrc
@@ -124,12 +124,12 @@ hermes setup --portal
 
 ## 前置条件
 
-**pip install：** 除 Python 3.11+ 外无其他前置条件，其余均自动处理。
+**pip install：** 除 Python 3.11–3.13 外无其他前置条件，其余均自动处理。
 
 **Git 安装程序：** 唯一的前置条件是 **Git**。安装程序自动处理其余一切：
 
 - **uv**（快速 Python 包管理器）
-- **Python 3.11**（通过 uv，无需 sudo）
+- **Python 3.11–3.13**（通过 uv，无需 sudo）
 - **Node.js v22**（用于浏览器自动化和 WhatsApp 桥接）
 - **ripgrep**（快速文件搜索）
 - **ffmpeg**（TTS 的音频格式转换）
