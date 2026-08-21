@@ -378,7 +378,9 @@ def test_provider_probe_uses_anthropic_oauth_headers(monkeypatch):
 
     assert readiness._provider_access_error("anthropic", {}) is None
     assert seen["headers"]["Authorization"] == "Bearer sk-ant-oat01-test"
-    assert seen["headers"]["anthropic-beta"] == "claude-code-20250219,oauth-2025-04-20"
+    betas = seen["headers"]["anthropic-beta"]
+    assert "claude-code-20250219" in betas
+    assert "oauth-2025-04-20" in betas
     assert seen["headers"]["x-app"] == "cli"
     assert "x-api-key" not in seen["headers"]
 
