@@ -23,7 +23,7 @@ Open **PowerShell** (or Windows Terminal) and run:
 iex (irm https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.ps1)
 ```
 
-No admin rights required. The installer goes to `%LOCALAPPDATA%\hermes\` and adds `hermes` to your **User PATH** — open a new terminal after it finishes.
+No admin rights required. The installer goes to `%LOCALAPPDATA%\hermes\`, preserves existing data, runs a readiness check, and starts the installed executable after interactive setup. Open a new terminal before using `hermes` from a shell that was already open during installation.
 
 **Installer options** (requires the scriptblock form to pass parameters):
 
@@ -68,15 +68,15 @@ Each dep has a `shutil.which(...)`-style check; if a binary is missing and the r
 Top-to-bottom, in order:
 
 1. **Bootstraps `uv`** — Astral's fast Python manager. Installed to `%USERPROFILE%\.local\bin`.
-2. **Installs Python 3.11** via `uv`. No existing Python needed.
+2. **Installs Python 3.11–3.13** via `uv`. No existing Python needed.
 3. **Installs Node.js 22** (winget if available, else a portable Node tarball unpacked under `%LOCALAPPDATA%\hermes\node`). Used for the browser tool and the WhatsApp bridge.
 4. **Installs portable Git** — if `git` is already on PATH the installer uses it; otherwise it downloads a trimmed, self-contained **PortableGit** (~45 MB, from the official `git-for-windows` release) to `%LOCALAPPDATA%\hermes\git`. No admin, no Windows installer registry, no interference with anything else on the box.
 5. **Clones the repo** to `%LOCALAPPDATA%\hermes\hermes-agent` and creates a virtualenv inside it.
 6. **Tiered `uv pip install`** — tries `.[all]` first, falls back to progressively smaller sets (`[messaging,dashboard,ext]` → `[messaging]` → `.`) if a `git+https` dep flakes on rate-limited GitHub. Prevents "single flake drops you to a bare install" failure mode.
 7. **Auto-installs messaging SDKs** keyed off `.env` — if `TELEGRAM_BOT_TOKEN` / `DISCORD_BOT_TOKEN` / `SLACK_BOT_TOKEN` / `SLACK_APP_TOKEN` / `WHATSAPP_ENABLED` are present, runs `python -m ensurepip --upgrade` and targeted `pip install` calls so each platform's SDK is actually importable.
 8. **Sets `HERMES_GIT_BASH_PATH`** to the resolved `bash.exe` so Hermes finds it deterministically in fresh shells.
-9. **Adds `%LOCALAPPDATA%\hermes\hermes-agent\venv\Scripts` to User PATH and sets `HERMES_HOME=%LOCALAPPDATA%\hermes`** — exposes the `hermes` command (and points it at your data dir) after you open a new terminal.
-10. **Runs `hermes setup`** — the normal first-run wizard (model, provider, toolsets). Skip with `-SkipSetup`.
+9. **Adds `%LOCALAPPDATA%\hermes\hermes-agent\venv\Scripts` to User PATH and sets `HERMES_HOME=%LOCALAPPDATA%\hermes`** — exposes the `hermes` command (and points it at your data dir) in new terminals.
+10. **Runs `hermes setup` and checks readiness** — the normal first-run wizard (model, provider, toolsets), followed by a machine-readable readiness check. Skip setup with `-SkipSetup`; install-only modes do not launch a partial install.
 
 :::tip Skip provider hunting on Windows
 On Windows, per-tool API key setup (Firecrawl, FAL, Browser Use, OpenAI TTS) is the highest-friction part of getting a useful agent. A [Nous Portal](/user-guide/features/tool-gateway) subscription covers the model **and** all of those tools through one OAuth login. After the installer finishes, run `hermes setup --portal` to wire everything up.

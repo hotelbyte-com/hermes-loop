@@ -69,7 +69,10 @@ iex (irm https://hermes-agent.nousresearch.com/install.ps1)
 If you're installing on a phone, see the dedicated [Termux guide](./termux.md) for the tested manual path, supported extras, and current Android-specific limitations.
 :::
 
-After it finishes, reload your shell:
+After interactive setup, the installer runs a readiness check and starts
+Hermes directly. No shell reload is needed for the first launch. If the shell
+was already open before installation, open a new shell or reload its profile
+before using `hermes`:
 
 ```bash
 source ~/.bashrc   # or source ~/.zshrc

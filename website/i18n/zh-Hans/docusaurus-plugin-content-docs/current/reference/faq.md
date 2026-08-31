@@ -30,7 +30,13 @@ Hermes Agent 可与任何兼容 OpenAI 的 API 配合使用。支持的提供商
 
 ### 支持 Windows 吗？
 
-**原生不支持。** Hermes Agent 需要类 Unix 环境。在 Windows 上，请安装 [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install) 并在其中运行 Hermes。标准安装命令在 WSL2 中可完美运行：
+**支持原生运行。** Hermes Agent 可通过 PowerShell 安装器在 Windows 上原生运行，无需 WSL。请在 PowerShell 中执行：
+
+```powershell
+iex (irm https://hermes-agent.nousresearch.com/install.ps1)
+```
+
+安装器会提供便携式 Git Bash 供终端工具使用。详见[原生 Windows 指南](../user-guide/windows-native.md)。WSL2 仍是受支持的替代方案，可在其中执行：
 
 ```bash
 curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
@@ -142,11 +148,11 @@ response = agent.chat("Explain quantum computing briefly")
 
 #### 安装后出现 `hermes: command not found`
 
-**原因：** Shell 未重新加载更新后的 PATH。
+**原因：** 安装前已打开的 shell 可能尚未获得更新后的 PATH。交互式安装成功后，安装器会直接启动已安装的可执行文件。
 
 **解决方案：**
 ```bash
-# 重新加载 shell 配置文件
+# 打开新的 shell，或重新加载配置文件
 source ~/.bashrc    # bash
 source ~/.zshrc     # zsh
 
@@ -165,7 +171,7 @@ ls ~/.local/bin/hermes
 
 #### Python 版本过旧
 
-**原因：** Hermes 需要 Python 3.11 或更新版本。
+**原因：** Hermes 需要 Python 3.11、3.12 或 3.13。
 
 **解决方案：**
 ```bash
@@ -176,7 +182,7 @@ sudo apt install python3.12   # Ubuntu/Debian
 brew install python@3.12      # macOS
 ```
 
-安装程序会自动处理此问题 — 如果在手动安装时看到此错误，请先升级 Python。
+安装程序会自动处理此问题 — 如果在手动安装时看到此错误，请先安装受支持的 Python 版本。
 
 #### 终端命令提示 `node: command not found`（或 `nvm`、`pyenv`、`asdf` 等）
 

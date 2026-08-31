@@ -32,4 +32,15 @@ def build_doctor_parser(subparsers, *, cmd_doctor: Callable) -> None:
             "doctor` first to see active advisories and their IDs."
         ),
     )
+    doctor_parser.add_argument(
+        "--ready",
+        "--readiness",
+        action="store_true",
+        help="Emit the bounded installer readiness receipt instead of the human report",
+    )
+    doctor_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="With --ready, emit one machine-readable JSON receipt",
+    )
     doctor_parser.set_defaults(func=cmd_doctor)

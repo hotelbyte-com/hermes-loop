@@ -111,3 +111,13 @@ def test_resolver_prefers_requested_version_then_fallbacks(source: str):
     assert "uv" in resolver and "python find" in resolver, (
         "resolver must probe availability via `uv python find`"
     )
+
+
+def test_install_dependencies_rejects_unsupported_existing_venv(source: str):
+    """An independently invoked dependency stage must fail closed."""
+    body = _function_body(source, "Install-Dependencies")
+    check_at = body.find("Test-SupportedPythonExecutable")
+    uv_python_at = body.find("$env:UV_PYTHON = $venvPythonExe")
+    assert check_at != -1, "Install-Dependencies must validate the existing venv version"
+    assert uv_python_at != -1, "Install-Dependencies must pin uv to the validated venv"
+    assert check_at < uv_python_at

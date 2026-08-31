@@ -32,6 +32,15 @@ def _resolve_install_layout_body() -> str:
     return body
 
 
+def _install_deps_body() -> str:
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    _, _, rest = text.partition("install_deps() {\n")
+    assert rest, "Could not find install_deps() in scripts/install.sh"
+    body, _, _ = rest.partition("\n}\n")
+    assert body, "Could not find install_deps() closing brace"
+    return body
+
+
 def test_root_fhs_layout_exports_world_readable_uv_python_dirs() -> None:
     text = INSTALL_SH.read_text(encoding="utf-8")
 
@@ -57,3 +66,13 @@ def test_root_fhs_uv_python_export_is_inside_root_branch() -> None:
     assert export_idx < return_idx, (
         "Export must precede the branch's `return 0` — otherwise unreachable"
     )
+
+
+def test_install_deps_rejects_unsupported_existing_venv() -> None:
+    """An independently invoked dependency stage must fail closed."""
+    body = _install_deps_body()
+    check_idx = body.find("python_version_supported \"$INSTALL_DIR/venv/bin/python\"")
+    export_idx = body.find('export UV_PYTHON="$INSTALL_DIR/venv/bin/python"')
+    assert check_idx != -1, "install_deps must validate the existing venv version"
+    assert export_idx != -1, "install_deps must pin uv to the validated venv"
+    assert check_idx < export_idx
